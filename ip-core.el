@@ -31,6 +31,11 @@
   :type 'string
   :group 'ip-core)
 
+(defcustom ip-upcase-properties t
+  "If non-nil, convert property names to uppercase in plists."
+  :type 'boolean
+  :group 'ip-core)
+
 (defun ip--load-org-file (filename)
   "Return parsed Org AST from FILENAME in `ip-org-directory'."
   (let ((path (expand-file-name filename ip-org-directory)))
@@ -47,11 +52,14 @@
         hl))))
 
 (defun ip--parse-properties (hl)
-  "Extract :PROPERTIES: from a headline as plist."
+  "Extract :PROPERTIES: from a headline as plist, converting numeric values."
   (let ((props (org-element-property :properties hl)))
     (if props
         (cl-loop for (k . v) in props
-                 append (list (intern (concat ":" (upcase (symbol-name k)))) v))
+                 append (list (intern (concat ":" (upcase (symbol-name k))))
+                              (if (member k '(pib maticni_broj model rate))
+                                  (string-to-number v)
+                                v)))
       '())))
 
 (defun ip-get-clients ()
