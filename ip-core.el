@@ -45,6 +45,7 @@
     (lambda (hl)
       (when (= (org-element-property :level hl) 1)
         hl))))
+
 (defun ip--parse-properties (hl)
   "Extract :PROPERTIES: from a headline as plist."
   (let ((props (org-element-property :properties hl)))
