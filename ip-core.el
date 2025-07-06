@@ -31,9 +31,6 @@
   :type 'string
   :group 'ip-core)
 
-
-
-
 (defun ip--load-org-file (filename)
   "Return parsed Org AST from FILENAME in `ip-org-directory'."
   (let ((path (expand-file-name filename ip-org-directory)))
@@ -48,7 +45,6 @@
     (lambda (hl)
       (when (= (org-element-property :level hl) 1)
         hl))))
-
 (defun ip--parse-properties (hl)
   "Extract :PROPERTIES: from a headline as plist."
   (let ((props (org-element-property :properties hl)))
