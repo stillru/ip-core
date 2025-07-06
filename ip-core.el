@@ -78,8 +78,7 @@
 
 ;;;###autoload
 (defun ip-show-overview ()
-  "Show summary of company and client list, including all company \
-properties for debugging."
+  "Show summary of company and client list.  Print all properties for debugging."
   (interactive)
   (let ((company (ip-get-company-info))
         (clients (ip-get-clients)))
