@@ -62,6 +62,7 @@
                                 v)))
       '())))
 
+;;;###autoload
 (defun ip-get-clients ()
   "Return list of clients as plists from `clients.org'."
   (let ((ast (ip--load-org-file ip-clients-file)))
@@ -69,6 +70,7 @@
              collect (append (list :name (org-element-property :raw-value hl))
                              (ip--parse-properties hl)))))
 
+;;;###autoload
 (defun ip-get-company-info ()
   "Return company info from `company.org' as plist (first headline)."
   (let* ((ast (ip--load-org-file ip-company-file))
