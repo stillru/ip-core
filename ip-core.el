@@ -78,20 +78,25 @@
 
 ;;;###autoload
 (defun ip-show-overview ()
-  "Show summary of company and client list."
+  "Show summary of company and client list, including all company \
+properties for debugging."
   (interactive)
   (let ((company (ip-get-company-info))
         (clients (ip-get-clients)))
     (with-current-buffer (get-buffer-create "*IP Overview*")
       (erase-buffer)
-      (insert (format "Company: %s\n" (plist-get company :name)))
-      (insert (format "Address: %s\n" (plist-get company :address)))
-      (insert (format "IBAN: %s\n\n" (plist-get company :iban)))
+      (insert "Company Properties (Debug):\n")
+      (cl-loop for (key value) on company by #'cddr
+               do (insert (format "%-20s: %s\n" key value)))
+      (insert "\nSummary:\n")
+      (insert (format "Company: %s\n" (plist-get company :NAME)))
+      (insert (format "Address: %s\n" (plist-get company :ADDRESS)))
+      (insert (format "IBAN: %s\n\n" (plist-get company :IBAN)))
       (insert "Clients:\n")
       (dolist (c clients)
         (insert (format "- %s (%s/hr)\n"
-                        (plist-get c :name)
-                        (or (plist-get c :rate) "?"))))
+                        (plist-get c :NAME)
+                        (or (plist-get c :RATE) "?"))))
       (goto-char (point-min))
       (read-only-mode 1)
       (pop-to-buffer (current-buffer)))))
