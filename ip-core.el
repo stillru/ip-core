@@ -89,7 +89,7 @@
                         (or (plist-get c :RATE) "?"))))
       (goto-char (point-min))
       (read-only-mode 1)
-      (pop-to-buffer (current-buffer))
+      (pop-to-buffer (current-buffer)))))
 
-      (provide 'ip-core))))
+(provide 'ip-core)
 ;;; ip-core.el ends here
