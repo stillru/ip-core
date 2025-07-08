@@ -38,28 +38,25 @@
 
 (defcustom ip-invoice-default-template
   "<html>
-<head><title>Invoice {{invoice-id}}</title>
+<head><title>Invoice</title>
 <style>table { border-collapse: collapse; } td, th { border: 1px solid black; padding: 8px; } body { font-family: Arial; }</style>
 </head>
 <body>
 <h1>Invoice for {{client.name}}</h1>
 <p>Period: {{start}} to {{end}}</p>
 <p>State: {{state}}</p>
-{{#if invoice-id}}
-<p>Invoice ID: {{invoice-id}}</p>
-{{/if}}
 <p>Client Address: {{client.address}}</p>
 <p>Client Email: {{client.email}}</p>
 <p>Payment Details: {{client.payment_details}}</p>
 <table>
   <tr><th>Service</th><th>Hours</th><th>Rate</th><th>Amount</th></tr>
-  {{#each services}}
+  {{#services}}
   <tr><td>{{description}}</td><td>{{hours}}</td><td>{{rate}}</td><td>{{amount}}</td></tr>
-  {{/each}}
-  {{#if tax-rate}}
+  {{/services}}
+  {{#tax-rate}}
   <tr><td colspan=\"3\">Subtotal</td><td>{{subtotal}} {{client.currency}}</td></tr>
   <tr><td colspan=\"3\">Tax ({{tax-rate}}%)</td><td>{{tax-amount}} {{client.currency}}</td></tr>
-  {{/if}}
+  {{/tax-rate}}
   <tr><td colspan=\"3\">Total</td><td>{{total}} {{client.currency}}</td></tr>
 </table>
 </body>
