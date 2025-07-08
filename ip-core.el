@@ -1,6 +1,7 @@
 ;;; ip-core.el --- Core module for IP management in Org-mode -*- lexical-binding: t; -*-
 
 ;;; Commentary:
+;; Core utilities for IP Manager, including client and file handling.
 
 ;;; Code:
 (require 'org-element)
@@ -48,19 +49,39 @@
 
 (defun ip--parse-properties (hl)
   "Extract :PROPERTIES: from a headline as plist."
-  (let ((props (org-element-property :properties hl)))
-    (if props
-        (cl-loop for (k . v) in props
-                 append (list (intern (concat ":" (upcase (symbol-name k)))) v))
+  (let ((drawer (org-element-map hl 'property-drawer #'identity)))
+    (if drawer
+        (cl-loop for node in (org-element-contents (car drawer))
+                 when (eq (org-element-type node) 'node-property)
+                 append (list (intern (concat ":" (upcase (org-element-property :key node))))
+                              (org-element-property :value node)))
       '())))
+
+(defun ip--normalize-tag (name)
+  "Normalize NAME for matching with tags (lowercase, no spaces or special chars)."
+  (downcase
+   (replace-regexp-in-string "[^a-zA-Z0-9]" "" name)))
 
 (defun ip-get-clients ()
   "Return list of clients as plists from `clients.org'."
   (condition-case err
       (let ((ast (ip--load-org-file ip-clients-file)))
         (cl-loop for hl in (ip--get-headlines ast)
-                 collect (append (list :NAME (org-element-property :raw-value hl))
-                                 (ip--parse-properties hl))))
+                 collect (let* ((client-name (org-element-property :raw-value hl))
+                                (client-id (ip--normalize-tag client-name))
+                                (props (ip--parse-properties hl))
+                                (services (org-element-map hl 'headline
+                                            (lambda (sub-hl)
+                                              (when (= (org-element-property :level sub-hl) 2)
+                                                (let ((service-name (org-element-property :raw-value sub-hl)))
+                                                  (append
+                                                   (list :description service-name
+                                                         :tag (ip--normalize-tag service-name))
+                                                   (ip--parse-properties sub-hl)))))))
+                           (append (list :NAME client-name
+                                         :ID client-id)
+                                   props
+                                   (list :services services)))))
     (error (message "Error loading clients: %s" err) '())))
 
 (defun ip-get-company-info ()
@@ -70,8 +91,7 @@
              (hl (car (ip--get-headlines ast))))
         (unless hl
           (error "No headlines found in %s" ip-company-file))
-        (let ((props (append (list :NAME (org-element-property :raw-value hl))
-                             (ip--parse-properties hl))))
+        (let ((props (append (ip--parse-properties hl))))
           (unless (plist-get props :NAME)
             (error "Company name not found in %s" ip-company-file))
           props))
