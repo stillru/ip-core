@@ -483,4 +483,124 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                                 (plist-get invoice :currency))))
             (insert "- No tasks found\n"))))
         (when (plist-get invoice :tax-rate)
-          (insert (format "\nSubtotal: %s %
+          (insert (format "\nSubtotal: %s %s\n"
+                          (plist-get invoice :subtotal)
+                          (plist-get invoice :currency)))
+          (insert (format "Tax (%.2f%%): %s %s\n"
+                          (plist-get invoice :tax-rate)
+                          (plist-get invoice :tax-amount)
+                          (plist-get invoice :currency))))
+        (insert (format "Total: %s %s\n"
+                        (plist-get invoice :total)
+                        (plist-get invoice :currency))))
+      (goto-char (point-min))
+      (read-only-mode 1))
+    (display-buffer buf)
+    (ip-debug-log 'success 'invoice "Text preview generated for %s" client-id)))
+
+(defun ip-invoice--generate-html (invoice output-file)
+  "Generate HTML invoice from INVOICE data to OUTPUT-FILE."
+  (ip-debug-log 'info 'invoice "Generating HTML invoice: %s" output-file)
+  (let* ((template (if (and ip-invoice-template-file
+                           (file-exists-p ip-invoice-template-file))
+                      (progn
+                        (ip-debug-log 'info 'invoice "Using custom template: %s" ip-invoice-template-file)
+                        (with-temp-buffer
+                          (insert-file-contents ip-invoice-template-file)
+                          (buffer-string)))
+                    (if (eq (plist-get invoice :type) 'task)
+                        (progn
+                          (ip-debug-log 'info 'invoice "Using task template")
+                          ip-invoice-task-template)
+                      (progn
+                        (ip-debug-log 'info 'invoice "Using default template")
+                        ip-invoice-default-template))))
+         (data (list
+                :invoice-id (or (plist-get invoice :invoice-id) "")
+                :client (list
+                         :name (encode-coding-string (or (plist-get (plist-get invoice :client) :NAME) "Unknown Client") 'utf-8)
+                         :address (encode-coding-string (or (plist-get (plist-get invoice :client) :ADDRESS) "N/A") 'utf-8)
+                         :email (encode-coding-string (or (plist-get (plist-get invoice :client) :EMAIL) "N/A") 'utf-8)
+                         :payment_details (encode-coding-string (or (plist-get (plist-get invoice :client) :PAYMENT_DETAILS) "N/A") 'utf-8)
+                         :currency (encode-coding-string (or (plist-get invoice :currency) "EUR") 'utf-8))
+                :start (encode-coding-string (or (plist-get invoice :start) "N/A") 'utf-8)
+                :end (encode-coding-string (or (plist-get invoice :end) "N/A") 'utf-8)
+                :state (encode-coding-string (or (symbol-name (plist-get invoice :state)) "draft") 'utf-8)
+                :services (mapcar
+                           (lambda (svc)
+                             (list
+                              :description (encode-coding-string (plist-get svc :description) 'utf-8)
+                              :hours (encode-coding-string (plist-get svc :hours) 'utf-8)
+                              :rate (encode-coding-string (plist-get svc :rate) 'utf-8)
+                              :amount (encode-coding-string (plist-get svc :amount) 'utf-8)))
+                           (or (plist-get invoice :services) ()))
+                :tasks (mapcar
+                        (lambda (task)
+                          (list
+                           :date (encode-coding-string (plist-get task :date) 'utf-8)
+                           :description (encode-coding-string (plist-get task :description) 'utf-8)
+                           :hours (encode-coding-string (plist-get task :hours) 'utf-8)
+                           :rate (encode-coding-string (plist-get task :rate) 'utf-8)
+                           :amount (encode-coding-string (plist-get task :amount) 'utf-8)))
+                        (or (plist-get invoice :tasks) ()))
+                :subtotal (encode-coding-string (or (plist-get invoice :subtotal) "0.00") 'utf-8)
+                :tax-rate (or (plist-get invoice :tax-rate) 0)
+                :tax-amount (encode-coding-string (or (plist-get invoice :tax-amount) "0.00") 'utf-8)
+                :total (encode-coding-string (or (plist-get invoice :total) "0.00") 'utf-8))))
+    (ip-debug-log 'debug 'invoice "Invoice data for Mustache: %S" data)
+    (condition-case err
+        (with-temp-file output-file
+          (let ((rendered (mustache-render template data)))
+            (ip-debug-log 'debug 'invoice "Mustache render output length: %d" (length rendered))
+            (insert rendered)
+            (ip-debug-log 'success 'invoice "HTML invoice generated: %s" output-file)))
+      (error
+       (ip-debug-log 'error 'invoice "Failed to generate HTML: %s" (error-message-string err))
+       (error "Failed to generate HTML: %s" (error-message-string err))))))
+
+;;;###autoload
+(defun ip-invoice-create (client-id start end &optional final invoice-type)
+  "Create invoice for CLIENT-ID from START to END.
+If FINAL is non-nil, generate a final invoice with a unique ID.
+INVOICE-TYPE is \\='service or \\='task."
+  (interactive
+   (list
+    (completing-read "Client ID: " (ip-list-client-ids))
+    (read-string "Start date (YYYY-MM-DD): ")
+    (read-string "End date (YYYY-MM-DD): ")
+    (y-or-n-p "Final invoice? ")
+    (intern (completing-read "Invoice type: " '("service" "task") nil t))))
+  (ip-debug-log 'info 'invoice "Creating %s invoice for %s (%s to %s)"
+                (if final "final" "draft") client-id start end)
+  (let* ((state (if final 'final 'draft))
+         (invoice-type (or invoice-type ip-invoice-type))
+         (invoice (ip-invoice-generate-data client-id start end state invoice-type))
+         (output-dir (if final ip-invoice-final-dir ip-invoice-draft-dir))
+         (type-suffix (if (eq invoice-type 'task) "-tasks" ""))
+         (filename (format "%sinvoice-%s%s.html" output-dir
+                           (or (plist-get invoice :invoice-id)
+                               (format "%s-%s" client-id (format-time-string "%Y%m%d")))
+                           type-suffix)))
+    (unless (file-directory-p output-dir)
+      (make-directory output-dir t)
+      (ip-debug-log 'info 'invoice "Created directory: %s" output-dir))
+    (ip-invoice--generate-html invoice filename)
+    (message "Invoice created: %s" filename)))
+
+;;;###autoload
+(defun ip-invoice-create-both (client-id start end &optional final)
+  "Create both service and task invoices for CLIENT-ID from START to END."
+  (interactive
+   (list
+    (completing-read "Client ID: " (ip-list-client-ids))
+    (read-string "Start date (YYYY-MM-DD): ")
+    (read-string "End date (YYYY-MM-DD): ")
+    (y-or-n-p "Final invoices? ")))
+  (ip-debug-log 'info 'invoice "Creating both invoices for %s (%s)"
+                client-id (if final "final" "draft"))
+  (ip-invoice-create client-id start end final 'service)
+  (ip-invoice-create client-id start end final 'task)
+  (message "Service and task invoices created for %s" client-id))
+
+(provide 'ip-invoice)
+;;; ip-invoice.el ends here
