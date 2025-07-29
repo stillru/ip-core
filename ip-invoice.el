@@ -33,7 +33,6 @@ MODULE is the module name (symbol).
 MESSAGE is the format string, followed by ARGS."
       `(ip-debug-log 'info ,module ,message ,@args))))
 
-
 (require 'cl-lib)
 (require 'org)
 (require 'org-clock)
@@ -47,7 +46,6 @@ MESSAGE is the format string, followed by ARGS."
     (require 'ip-debug)
   (error
    (ip-debug-log 'warning 'invoice "Failed to load ip-debug.el, using fallback logging")))
-
 
 ;;; Customization
 (defgroup ip-invoice nil
@@ -222,7 +220,6 @@ MESSAGE is the format string, followed by ARGS."
 
 (defun ip-invoice--parse-task (task)
   "Extract task information as a plist."
-  (ip-debug-log 'debug 'invoice "Parsing task - %s" task)
   (condition-case err
       (let* ((raw-title (org-element-property :raw-value task))
              (tags (org-element-property :tags task))
@@ -434,6 +431,86 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
       (ip-debug-log 'error 'invoice "Unknown invoice type: %s" invoice-type)
       (error "Unknown invoice type: %s" invoice-type)))))
 
+(defun ip-invoice--convert-plist-to-mustache-data (plist)
+  "Convert a PLIST with keyword keys to a Mustache-compatible alist."
+  (let (result)
+    (while plist
+      (let ((key (car plist))
+            (value (cadr plist)))
+        (push (cons (substring (symbol-name key) 1) ; Remove leading colon
+                    (cond
+                     ((and (listp value) (not (null value)) (keywordp (car value)))
+                      (ip-invoice--convert-plist-to-mustache-data value))
+                     ((and (listp value) (listp (car value)))
+                      (mapcar #'ip-invoice--convert-plist-to-mustache-data value))
+                     (t value)))
+              result)
+        (setq plist (cddr plist))))
+    (nreverse result)))
+
+(defun ip-invoice--generate-html (invoice output-file)
+  "Generate HTML invoice from INVOICE data to OUTPUT-FILE."
+  (ip-debug-log 'info 'invoice "Generating HTML invoice: %s" output-file)
+  (let* ((template (if (and ip-invoice-template-file
+                           (file-exists-p ip-invoice-template-file))
+                      (progn
+                        (ip-debug-log 'info 'invoice "Using custom template: %s" ip-invoice-template-file)
+                        (with-temp-buffer
+                          (insert-file-contents ip-invoice-template-file)
+                          (buffer-string)))
+                    (if (eq (plist-get invoice :type) 'task)
+                        (progn
+                          (ip-debug-log 'info 'invoice "Using task template")
+                          ip-invoice-task-template)
+                      (progn
+                        (ip-debug-log 'info 'invoice "Using default template")
+                        ip-invoice-default-template))))
+         (data (ip-invoice--convert-plist-to-mustache-data
+                (list
+                 :invoice-id (or (plist-get invoice :invoice-id) "")
+                 :client (list
+                          :name (encode-coding-string (or (plist-get (plist-get invoice :client) :NAME) "Unknown Client") 'utf-8)
+                          :address (encode-coding-string (or (plist-get (plist-get invoice :client) :ADDRESS) "N/A") 'utf-8)
+                          :email (encode-coding-string (or (plist-get (plist-get invoice :client) :EMAIL) "N/A") 'utf-8)
+                          :payment_details (encode-coding-string (or (plist-get (plist-get invoice :client) :PAYMENT_DETAILS) "N/A") 'utf-8)
+                          :currency (encode-coding-string (or (plist-get invoice :currency) "EUR") 'utf-8))
+                 :start (encode-coding-string (or (plist-get invoice :start) "N/A") 'utf-8)
+                 :end (encode-coding-string (or (plist-get invoice :end) "N/A") 'utf-8)
+                 :state (encode-coding-string (or (symbol-name (plist-get invoice :state)) "draft") 'utf-8)
+                 :services (mapcar
+                            (lambda (svc)
+                              (list
+                               :description (encode-coding-string (plist-get svc :description) 'utf-8)
+                               :hours (encode-coding-string (plist-get svc :hours) 'utf-8)
+                               :rate (encode-coding-string (plist-get svc :rate) 'utf-8)
+                               :amount (encode-coding-string (plist-get svc :amount) 'utf-8)))
+                            (or (plist-get invoice :services) ()))
+                 :tasks (mapcar
+                         (lambda (task)
+                           (list
+                            :date (encode-coding-string (plist-get task :date) 'utf-8)
+                            :description (encode-coding-string (plist-get task :description) 'utf-8)
+                            :hours (encode-coding-string (plist-get task :hours) 'utf-8)
+                            :rate (encode-coding-string (plist-get task :rate) 'utf-8)
+                            :amount (encode-coding-string (plist-get task :amount) 'utf-8)))
+                         (or (plist-get invoice :tasks) ()))
+                 :subtotal (encode-coding-string (or (plist-get invoice :subtotal) "0.00") 'utf-8)
+                 :tax-rate (or (plist-get invoice :tax-rate) 0)
+                 :tax-amount (encode-coding-string (or (plist-get invoice :tax-amount) "0.00") 'utf-8)
+                 :total (encode-coding-string (or (plist-get invoice :total) "0.00") 'utf-8)))))
+    (ip-debug-log 'debug 'invoice "Invoice data for Mustache: %S" data)
+    (condition-case err
+        (with-temp-file output-file
+          (let ((rendered (mustache-render template data)))
+            (ip-debug-log 'debug 'invoice "Mustache render output length: %d" (length rendered))
+            (ip-debug-log 'debug 'invoice "Rendered content: %s" rendered)
+            (insert rendered)
+            (write-region (point-min) (point-max) output-file nil 'silent) ; Ensure file is written
+            (ip-debug-log 'success 'invoice "HTML invoice generated: %s" output-file)))
+      (error
+       (ip-debug-log 'error 'invoice "Failed to generate HTML: %s" (error-message-string err))
+       (error "Failed to generate HTML: %s" (error-message-string err))))))
+
 ;;;###autoload
 (defun ip-invoice-preview-text (client-id start end &optional state invoice-type)
   "Display a textual preview of the invoice for CLIENT-ID from START to END."
@@ -497,66 +574,6 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
       (read-only-mode 1))
     (display-buffer buf)
     (ip-debug-log 'success 'invoice "Text preview generated for %s" client-id)))
-
-(defun ip-invoice--generate-html (invoice output-file)
-  "Generate HTML invoice from INVOICE data to OUTPUT-FILE."
-  (ip-debug-log 'info 'invoice "Generating HTML invoice: %s" output-file)
-  (let* ((template (if (and ip-invoice-template-file
-                           (file-exists-p ip-invoice-template-file))
-                      (progn
-                        (ip-debug-log 'info 'invoice "Using custom template: %s" ip-invoice-template-file)
-                        (with-temp-buffer
-                          (insert-file-contents ip-invoice-template-file)
-                          (buffer-string)))
-                    (if (eq (plist-get invoice :type) 'task)
-                        (progn
-                          (ip-debug-log 'info 'invoice "Using task template")
-                          ip-invoice-task-template)
-                      (progn
-                        (ip-debug-log 'info 'invoice "Using default template")
-                        ip-invoice-default-template))))
-         (data (list
-                :invoice-id (or (plist-get invoice :invoice-id) "")
-                :client (list
-                         :name (encode-coding-string (or (plist-get (plist-get invoice :client) :NAME) "Unknown Client") 'utf-8)
-                         :address (encode-coding-string (or (plist-get (plist-get invoice :client) :ADDRESS) "N/A") 'utf-8)
-                         :email (encode-coding-string (or (plist-get (plist-get invoice :client) :EMAIL) "N/A") 'utf-8)
-                         :payment_details (encode-coding-string (or (plist-get (plist-get invoice :client) :PAYMENT_DETAILS) "N/A") 'utf-8)
-                         :currency (encode-coding-string (or (plist-get invoice :currency) "EUR") 'utf-8))
-                :start (encode-coding-string (or (plist-get invoice :start) "N/A") 'utf-8)
-                :end (encode-coding-string (or (plist-get invoice :end) "N/A") 'utf-8)
-                :state (encode-coding-string (or (symbol-name (plist-get invoice :state)) "draft") 'utf-8)
-                :services (mapcar
-                           (lambda (svc)
-                             (list
-                              :description (encode-coding-string (plist-get svc :description) 'utf-8)
-                              :hours (encode-coding-string (plist-get svc :hours) 'utf-8)
-                              :rate (encode-coding-string (plist-get svc :rate) 'utf-8)
-                              :amount (encode-coding-string (plist-get svc :amount) 'utf-8)))
-                           (or (plist-get invoice :services) ()))
-                :tasks (mapcar
-                        (lambda (task)
-                          (list
-                           :date (encode-coding-string (plist-get task :date) 'utf-8)
-                           :description (encode-coding-string (plist-get task :description) 'utf-8)
-                           :hours (encode-coding-string (plist-get task :hours) 'utf-8)
-                           :rate (encode-coding-string (plist-get task :rate) 'utf-8)
-                           :amount (encode-coding-string (plist-get task :amount) 'utf-8)))
-                        (or (plist-get invoice :tasks) ()))
-                :subtotal (encode-coding-string (or (plist-get invoice :subtotal) "0.00") 'utf-8)
-                :tax-rate (or (plist-get invoice :tax-rate) 0)
-                :tax-amount (encode-coding-string (or (plist-get invoice :tax-amount) "0.00") 'utf-8)
-                :total (encode-coding-string (or (plist-get invoice :total) "0.00") 'utf-8))))
-    (ip-debug-log 'debug 'invoice "Invoice data for Mustache: %S" data)
-    (condition-case err
-        (with-temp-file output-file
-          (let ((rendered (mustache-render template data)))
-            (ip-debug-log 'debug 'invoice "Mustache render output length: %d" (length rendered))
-            (insert rendered)
-            (ip-debug-log 'success 'invoice "HTML invoice generated: %s" output-file)))
-      (error
-       (ip-debug-log 'error 'invoice "Failed to generate HTML: %s" (error-message-string err))
-       (error "Failed to generate HTML: %s" (error-message-string err))))))
 
 ;;;###autoload
 (defun ip-invoice-create (client-id start end &optional final invoice-type)
