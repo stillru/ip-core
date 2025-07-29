@@ -139,28 +139,25 @@
 (defun ip--task-in-range-p (task start end)
   "Return t if TASK has any clock entries between START and END."
   (let* ((start-ts (date-to-time start))
-         (end-ts (date-to-time end))
-         (clocks (org-element-map task 'clock
-                   (lambda (cl)
-                     (when-let ((start-time (org-element-property :value cl))
-                                (end-time (org-element-property :end-time cl)))
-                       (let ((start-str (org-element-property :raw-value start-time))
-                             (end-str (org-element-property :raw-value end-time)))
-                         (when (and start-str end-str)
-                           (cons (org-time-string-to-time start-str)
-                                 (org-time-string-to-time end-str)))))))))
-    (cl-some (lambda (pair)
-               (and pair
-                    (time-less-p (car pair) end-ts)
-                    (time-less-p start-ts (cdr pair))))
-             clocks)))
+         (end-ts (date-to-time end)))
+    (cl-some
+     (lambda (cl)
+       (when-let* ((start-ts-obj (org-element-property :value cl))
+                   (end-ts-obj (org-element-property :end-time cl))
+                   (start-str (org-element-property :raw-value start-ts-obj))
+                   (end-str (org-element-property :raw-value end-ts-obj))
+                   (clock-start (org-time-string-to-time start-str))
+                   (clock-end (org-time-string-to-time end-str)))
+         (and (time-less-p clock-start end-ts)
+              (time-less-p start-ts clock-end))))
+     (org-element-map task 'clock #'identity))))
 
 (defun ip--parse-task (task)
   "Extract relevant info from TASK headline."
   (condition-case err
-      (let* ((tags (mapcar #'downcase (org-element-property :tags task)))
-             (client (or (cl-find-if (lambda (tag) (member tag (ip-list-client-ids))) tags) "unknown"))
-             (service (or (cl-find-if (lambda (tag) (member tag (ip-list-service-tags))) tags) "general"))
+      (let* ((props (org-element-property :properties task))
+             (client (or (cdr (assoc-string "CLIENT" props t)) "unknown"))
+             (service (or (cdr (assoc-string "REPO" props t)) "general"))
              (title (org-element-property :raw-value task))
              (hours (ip--task-total-hours task)))
         (list :title title :client client :service service :hours hours))
@@ -191,26 +188,26 @@
          (end-ts (date-to-time end)))
     (org-element-map task 'clock
       (lambda (cl)
-        (when-let ((start-time (org-element-property :value cl))
-                   (end-time (org-element-property :end-time cl)))
-          (let ((start-str (org-element-property :raw-value start-time))
-                (end-str (org-element-property :raw-value end-time)))
-            (when (and start-str end-str)
-              (let ((clock-start (org-time-string-to-time start-str))
+        (when-let* ((range-str (org-element-property :value cl))
+                    (parts (split-string range-str "--"))
+                    (start-str (string-trim (car parts)))
+                    (end-str (string-trim (cadr parts)))
+                    (clock-start (org-time-string-to-time start-str))
                     (clock-end (org-time-string-to-time end-str)))
-                (when (and (time-less-p clock-start end-ts)
-                           (time-less-p start-ts clock-end))
-                  (list :start clock-start
-                        :end clock-end 
-                        :date (format-time-string "%Y-%m-%d" clock-start)
-                        :hours (/ (float-time (time-subtract clock-end clock-start)) 3600.0)))))))))))
+          (when (and (time-less-p clock-start end-ts)
+                     (time-less-p start-ts clock-end))
+            (list :start clock-start
+                  :end clock-end 
+                  :date (format-time-string "%Y-%m-%d" clock-start)
+                  :hours (/ (float-time (time-subtract clock-end clock-start)) 3600.0))))))))
+
 
 (defun ip--parse-task-detailed (task)
   "Extract detailed info from TASK headline including all clock entries."
   (condition-case err
-      (let* ((tags (mapcar #'downcase (org-element-property :tags task)))
-             (client (or (cl-find-if (lambda (tag) (member tag (ip-list-client-ids))) tags) "unknown"))
-             (service (or (cl-find-if (lambda (tag) (member tag (ip-list-service-tags))) tags) "general"))
+      (let* ((props (org-element-property :properties task))
+             (client (or (cdr (assoc-string "CLIENT" props t)) "unknown"))
+             (service (or (cdr (assoc-string "REPO" props t)) "general"))
              (title (org-element-property :raw-value task)))
         (list :title title :client client :service service :element task))
     (error (message "Error parsing task: %s" (error-message-string err))
@@ -234,7 +231,7 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
          (tax-rate (or (plist-get client :TAX_RATE) nil))
          (invoice-id (when (eq state 'final)
                        (ip--generate-final-invoice-id))))
-    
+
     (cond
      ;; Service-based invoice (original logic)
      ((eq invoice-type 'service)
@@ -281,7 +278,7 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                 :tax-rate tax-rate
                 :tax-amount (format "%.2f" tax-amount)
                 :total (format "%.2f" total)))))
-     
+
      ;; Task-based invoice (new logic)
      ((eq invoice-type 'task)
       (let* ((tasks (ip--load-tasks-detailed start end))
@@ -326,7 +323,7 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                 :tax-rate tax-rate
                 :tax-amount (format "%.2f" tax-amount)
                 :total (format "%.2f" total)))))
-     
+
      (t (error "Unknown invoice type: %s" invoice-type)))))
 
 ;;;###autoload
@@ -351,7 +348,7 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
       (insert (format "Type: %s\n" (plist-get invoice :type)))
       (when-let ((id (plist-get invoice :invoice-id)))
         (insert (format "Invoice ID: %s\n" id)))
-      
+
       ;; Display items based on invoice type
       (cond
        ((eq (plist-get invoice :type) 'service)
@@ -375,7 +372,7 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                           (plist-get invoice :currency)
                           (plist-get task :amount)
                           (plist-get invoice :currency))))))
-      
+
       (when (plist-get invoice :tax-rate)
         (insert (format "\nSubtotal: %s %s\n"
                         (plist-get invoice :subtotal)

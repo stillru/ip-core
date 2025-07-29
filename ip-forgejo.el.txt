@@ -1,0 +1,475 @@
+;;; ip-forgejo.el --- Org importer from Forgejo issues -*- lexical-binding: t; -*-
+
+;;; Commentary:
+;; This module handles synchronization between Forgejo issues and Org-mode.
+;; It fetches assigned issues and their time logs, formats them as Org entries,
+;; and inserts or updates them in the current buffer.
+;; Supports two-way sync for status, time, and body.
+;; Designed for multi-client reporting workflows.
+
+;;; Code:
+
+(require 'request)
+(require 'org)
+(require 'org-element)
+(require 'time-date)
+(require 'seq)
+(require 'cl-lib)
+
+(defgroup ip-forgejo nil
+  "Synchronization between local Org files and Forgejo issues."
+  :group 'ip-core)
+
+(defcustom ip-forgejo-instances
+  '(("work"    . (("base-url" . "https://git.company.com/api/v1")
+                  ("token"    . "tkn_work_123")))
+    ("home"    . (("base-url" . "https://git.home.org/api/v1")
+                  ("token"    . "tkn_home_456")))
+    ("client"  . (("base-url" . "http://git.maketv.internal/api/v1")
+                  ("token"    . "52ba51cd10ba0250444d872e10ac1dd730cee076"))))
+  "List of Forgejo instances: ((NAME . ((\"base-url\" . URL) (\"token\" . TOKEN)))...)"
+  :type '(alist :key-type string :value-type (alist :key-type string :value-type string))
+  :group 'ip-forgejo)
+
+(defcustom ip-forgejo-current-instance "client"
+  "Default Forgejo instance to use."
+  :type 'string
+  :group 'ip-forgejo)
+
+(defcustom ip-forgejo-batch-size 50
+  "Number of issues to process in one batch for better performance."
+  :type 'integer
+  :group 'ip-forgejo)
+
+(defcustom ip-forgejo-cache-timeout 300
+  "Cache timeout in seconds for API responses."
+  :type 'integer
+  :group 'ip-forgejo)
+
+;; Internal cache for API responses
+(defvar ip-forgejo--cache (make-hash-table :test 'equal))
+
+(defun ip-forgejo--current-config ()
+  "Return (base-url . token) for current instance."
+  (let* ((instance (assoc ip-forgejo-current-instance ip-forgejo-instances)))
+    (unless instance
+      (user-error "Unknown Forgejo instance: %s" ip-forgejo-current-instance))
+    (let ((config (cdr instance)))
+      (cons (alist-get "base-url" config nil nil #'string=)
+            (alist-get "token" config nil nil #'string=)))))
+
+;;;###autoload
+(defun ip-forgejo-switch-instance ()
+  "Switch current Forgejo instance."
+  (interactive)
+  (let ((names (mapcar #'car ip-forgejo-instances)))
+    (setq ip-forgejo-current-instance
+          (completing-read "Switch to instance: " names nil t))
+    (clrhash ip-forgejo--cache))) ; Clear cache when switching instances
+
+(defun ip-forgejo--clean-body (body)
+  "Remove ^M (carriage return) and normalize line endings."
+  (when (and body (stringp body))
+    (string-trim (replace-regexp-in-string "\r\n?" "\n" body))))
+
+(defun ip-forgejo--ensure-list (value)
+  "Convert VALUE to list if it's a vector or nil."
+  (cond
+   ((null value) '())
+   ((vectorp value) (append value nil))
+   ((listp value) value)
+   (t (list value))))
+
+(defun ip-forgejo--log (level message &rest args)
+  "Log MESSAGE with LEVEL to sync process buffer."
+  (let ((formatted-msg (apply #'format message args))
+        (timestamp (format-time-string "[%H:%M:%S] ")))
+    (with-current-buffer (get-buffer-create "*Sync Process Log*")
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert (format "%s%s %s\n" 
+                        timestamp
+                        (pcase level
+                          ('info "ℹ️")
+                          ('success "✓")
+                          ('warning "⚠️")
+                          ('error "❌")
+                          (_ "•"))
+                        formatted-msg))))))
+
+(defun ip-forgejo--cache-key (url)
+  "Generate cache key for URL."
+  (format "%s:%s" ip-forgejo-current-instance url))
+
+(defun ip-forgejo--cache-valid-p (key)
+  "Check if cache entry for KEY is still valid."
+  (let ((entry (gethash key ip-forgejo--cache)))
+    (and entry
+         (< (- (float-time) (car entry)) ip-forgejo-cache-timeout))))
+
+(defun ip-forgejo--api (url &optional headers force-refresh)
+  "Send a synchronous GET request to Forgejo API at URL with caching."
+  (let* ((cache-key (ip-forgejo--cache-key url))
+         (cached-response (when (not force-refresh)
+                           (and (ip-forgejo--cache-valid-p cache-key)
+                                (cdr (gethash cache-key ip-forgejo--cache))))))
+    
+    (if cached-response
+        (progn
+          (ip-forgejo--log 'info "Using cached response for %s" url)
+          cached-response)
+      
+      (let* ((config (ip-forgejo--current-config))
+             (token (cdr config))
+             (auth-header `("Authorization" . ,(concat "token " token)))
+             (all-headers (cons auth-header (or headers '())))
+             (start-time (current-time))
+             result
+             response-data)
+        
+        (ip-forgejo--log 'info "Request: GET %s" url)
+        
+        (condition-case err
+            (progn
+              (setq result
+                    (request url
+                      :type "GET"
+                      :headers all-headers
+                      :parser (lambda ()
+                                (condition-case parse-err
+                                    (json-parse-string (buffer-string)
+                                                       :object-type 'alist
+                                                       :array-type 'list
+                                                       :null-object nil
+                                                       :false-object :false)
+                                  (error
+                                   (ip-forgejo--log 'error "JSON parse error: %s" (error-message-string parse-err))
+                                   nil)))
+                      :sync t
+                      :timeout 30))
+              
+              (setq response-data (request-response-data result))
+              (let ((duration (float-time (time-since start-time)))
+                    (status (request-response-status-code result)))
+                
+                (if (and (>= status 200) (< status 300))
+                    (progn
+                      (ip-forgejo--log 'success "Response: %d bytes (%.3fs)" 
+                                       (length (prin1-to-string response-data)) duration)
+                      ;; Cache successful response
+                      (puthash cache-key (cons (float-time) response-data) ip-forgejo--cache)
+                      response-data)
+                  (progn
+                    (ip-forgejo--log 'error "HTTP %d error (%.3fs)" status duration)
+                    (error "HTTP %d error for %s" status url)))))
+          
+          (error
+           (let ((duration (float-time (time-since start-time))))
+             (ip-forgejo--log 'error "Request FAILED: %s (%.3fs)" 
+                              (error-message-string err) duration)
+             (signal (car err) (cdr err)))))))))
+
+(defun ip-forgejo--org-todo-state (state)
+  "Convert Forgejo issue STATE to Org-mode TODO keyword."
+  (pcase state
+    ("open" "TODO")
+    ("closed" "DONE")
+    (_ "TODO")))
+
+(defun ip-forgejo--format-logbook (entries)
+  "Format a list of time log ENTRIES into Org-mode :LOGBOOK: CLOCK lines."
+  (if (null entries)
+      ""
+    (let ((formatted-entries
+           (cl-remove nil
+                      (mapcar
+                       (lambda (entry)
+                         (let* ((created-str (alist-get 'created entry))
+                                (duration (alist-get 'time entry 0))
+                                (ts (and created-str 
+                                         (condition-case nil
+                                             (date-to-time created-str)
+                                           (error nil))))
+                                (end-time (and ts (time-add ts (seconds-to-time duration))))
+                                (start-str (and ts (format-time-string "[%Y-%m-%d %a %H:%M]" ts)))
+                                (end-str (and end-time (format-time-string "[%Y-%m-%d %a %H:%M]" end-time)))
+                                (h (/ duration 3600))
+                                (m (/ (% duration 3600) 60)))
+                           (when (and start-str end-str (> duration 0))
+                             (format "CLOCK: %s--%s => %02d:%02d" start-str end-str h m))))
+                       (ip-forgejo--ensure-list entries)))))
+      (if formatted-entries
+          (string-join formatted-entries "\n")
+        ""))))
+
+(defun ip-forgejo--safe-get (alist key &optional default)
+  "Safely get KEY from ALIST, returning DEFAULT if not found."
+  (let ((value (alist-get key alist)))
+    (if (and value (not (string-empty-p (format "%s" value))))
+        value
+      default)))
+
+(defun ip-forgejo--format-entry (issue times owner-name repo-name)
+  "Format a single ISSUE with TIMES, OWNER-NAME as CLIENT, and REPO-NAME."
+  (let* ((title (ip-forgejo--safe-get issue 'title "Untitled Issue"))
+         (state (ip-forgejo--safe-get issue 'state "open"))
+         (todo (ip-forgejo--org-todo-state state))
+         (labels (if-let ((label-list (ip-forgejo--ensure-list (alist-get 'labels issue))))
+                     (string-join (mapcar (lambda (lbl) (alist-get 'name lbl)) label-list) " ")
+                   ""))
+         (milestone (if-let ((m (alist-get 'milestone issue)))
+                        (alist-get 'title m)
+                      ""))
+         (id (alist-get 'id issue))
+         (number (alist-get 'number issue))
+         (body (ip-forgejo--clean-body (alist-get 'body issue)))
+         (total-time (cl-reduce #'+ (mapcar (lambda (e) (alist-get 'time e 0))
+                                            (ip-forgejo--ensure-list times))
+                                :initial-value 0))
+         (logbook (ip-forgejo--format-logbook times))
+         (org-id (org-id-new)))
+    
+    (format "* %s %s\n:PROPERTIES:\n:ID:           %s\n:FORGEJO_ID:   %s\n:FORGEJO_NUM:  %s\n:STATE:        %s\n:CLIENT:       %s\n:REPO:         %s\n:LABELS:       %s\n:MILESTONE:    %s\n:TIME:         %d\n:END:\n%s%s\n\n%s\n\n:COMMENTS:\n:END:\n"
+            todo title org-id id number state owner-name repo-name labels milestone total-time
+            (if (string-empty-p logbook) "" (format ":LOGBOOK:\n%s\n:END:\n" logbook))
+            (if (string-empty-p body) "" body))))
+
+(defun ip-forgejo--find-entry-by-id (forgejo-id)
+  "Find Org heading position by FORGEJO_ID. Returns (START . END) or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward (format "^[ \t]*:FORGEJO_ID:[ \t]+%s[ \t]*$" 
+                                     (regexp-quote (format "%s" forgejo-id))) nil t)
+      (let* ((props-end (point))
+             (heading-start (save-excursion
+                              (re-search-backward "^\\*+ " nil t)
+                              (point)))
+             (subtree-end (save-excursion
+                            (goto-char heading-start)
+                            (org-end-of-subtree t)
+                            (point))))
+        (cons heading-start subtree-end)))))
+
+(defun ip-forgejo--replace-or-insert-entry (forgejo-id entry)
+  "Find Org heading by FORGEJO_ID and replace its subtree with ENTRY."
+  (if-let ((bounds (ip-forgejo--find-entry-by-id forgejo-id)))
+      (progn
+        (goto-char (car bounds))
+        (delete-region (car bounds) (cdr bounds))
+        (insert entry)
+        'updated)
+    (progn
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (insert entry)
+      (insert "\n")
+      'inserted)))
+
+(defun ip-forgejo--process-issues-batch (issues)
+  "Process a batch of ISSUES efficiently."
+  (let ((processed 0)
+        (total (length issues))
+        (errors 0))
+    
+    (dolist (issue issues)
+      (condition-case err
+          (let* ((repo (alist-get 'repository issue))
+                 (owner-data (alist-get 'owner repo))
+                 (owner-name (if (stringp owner-data)
+                                 owner-data
+                               (alist-get 'login owner-data)))
+                 (repo-name (alist-get 'name repo))
+                 (issue-id (alist-get 'id issue))
+                 (number (alist-get 'number issue))
+                 (title (alist-get 'title issue))
+                 (times-url (format "%s/repos/%s/%s/issues/%s/times"
+                                    (car (ip-forgejo--current-config))
+                                    owner-name repo-name number))
+                 times entry action)
+            
+            (setq times (condition-case time-err
+                            (ip-forgejo--ensure-list (ip-forgejo--api times-url))
+                          (error
+                           (ip-forgejo--log 'warning "Failed to fetch times for #%d: %s" 
+                                            number (error-message-string time-err))
+                           nil)))
+            
+            (setq entry (ip-forgejo--format-entry issue times owner-name repo-name))
+            (setq action (ip-forgejo--replace-or-insert-entry issue-id entry))
+            
+            (ip-forgejo--log 'success "%s: %s (#%d)" 
+                             (if (eq action 'updated) "Updated" "Imported")
+                             title number)
+            (cl-incf processed))
+        
+        (error
+         (cl-incf errors)
+         (ip-forgejo--log 'error "Failed to process issue: %s" (error-message-string err)))))
+    
+    (ip-forgejo--log 'info "Batch complete: %d processed, %d errors" processed errors)
+    (cons processed errors)))
+
+;;;###autoload
+(defun ip-forgejo--push-issue (forgejo-id title body state &optional repo-owner repo-name)
+  "Update remote Forgejo issue with new state, body, and title."
+  (let* ((config (ip-forgejo--current-config))
+         (base-url (car config))
+         (token (cdr config))
+         (owner (or repo-owner (org-entry-get nil "CLIENT")))
+         (repo (or repo-name (org-entry-get nil "REPO")))
+         (url (format "%s/repos/%s/%s/issues/%d" base-url owner repo forgejo-id))
+         (patch-data `((title . ,title)
+                       (body . ,body)
+                       (state . ,state))))
+    (unless (and owner repo)
+      (error "Cannot determine repository owner or name for issue %d" forgejo-id))
+    
+    (ip-forgejo--log 'info "Pushing update to issue %d" forgejo-id)
+    (request url
+      :type "PATCH"
+      :headers `(("Authorization" . ,(concat "token " token))
+                 ("Content-Type" . "application/json"))
+      :data (json-serialize patch-data)
+      :sync t
+      :success (cl-function
+                (lambda (&key data &allow-other-keys)
+                  (ip-forgejo--log 'success "Issue %d updated successfully" forgejo-id)))
+      :error (cl-function
+              (lambda (&key error-thrown &allow-other-keys)
+                (ip-forgejo--log 'error "Failed to update issue %d: %s" 
+                                 forgejo-id error-thrown))))))
+
+;;;###autoload
+(defun ip-forgejo--add-time-entry (issue-id time-seconds &optional repo-owner repo-name)
+  "Log time entry to Forgejo issue."
+  (let* ((config (ip-forgejo--current-config))
+         (base-url (car config))
+         (token (cdr config))
+         (owner (or repo-owner (org-entry-get nil "CLIENT")))
+         (repo (or repo-name (org-entry-get nil "REPO")))
+         (url (format "%s/repos/%s/%s/issues/%d/times" base-url owner repo issue-id))
+         (post-data `((created . ,(format-time-string "%Y-%m-%dT%H:%M:%S%z"))
+                      (time . ,time-seconds))))
+    (unless (and owner repo)
+      (error "Cannot determine repository owner or name for issue %d" issue-id))
+    
+    (ip-forgejo--log 'info "Adding time entry: %d seconds to issue %d" time-seconds issue-id)
+    (request url
+      :type "POST"
+      :headers `(("Authorization" . ,(concat "token " token))
+                 ("Content-Type" . "application/json"))
+      :data (json-serialize post-data)
+      :sync t
+      :success (cl-function
+                (lambda (&key data &allow-other-keys)
+                  (ip-forgejo--log 'success "Time entry added to issue %d" issue-id)))
+      :error (cl-function
+              (lambda (&key error-thrown &allow-other-keys)
+                (ip-forgejo--log 'error "Failed to add time entry to issue %d: %s" 
+                                 issue-id error-thrown))))))
+
+;;;###autoload
+(defun ip-forgejo-list-clients ()
+  "Show a list of all clients (owners) from imported issues."
+  (interactive)
+  (let (clients)
+    (org-map-entries
+     (lambda ()
+       (when-let ((client (org-entry-get nil "CLIENT")))
+         (cl-pushnew client clients :test 'string=)))
+     "FORGEJO_ID>\"\"") ; only imported issues
+    
+    (with-current-buffer (get-buffer-create "*Forgejo Clients*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "=== Clients (Repository Owners) ===\n\n")
+        (if clients
+            (dolist (client (sort clients #'string<))
+              (insert (format "- %s\n" client)))
+          (insert "No clients found.\n"))
+        (goto-char (point-min)))
+      (display-buffer (current-buffer)))))
+
+;;;###autoload
+(defun ip-forgejo-clear-cache ()
+  "Clear the API response cache."
+  (interactive)
+  (clrhash ip-forgejo--cache)
+  (message "Forgejo API cache cleared"))
+
+;;;###autoload
+(defun ip-forgejo-import-my-issues (&optional force-refresh)
+  "Import or update assigned Forgejo issues in the current Org buffer.
+With prefix argument FORCE-REFRESH, bypass cache."
+  (interactive "P")
+  (let* ((config (ip-forgejo--current-config))
+         (base-url (car config))
+         (search-url (concat base-url "/repos/issues/search"
+                             "?state=all&type=issues"
+                             "&assigned=true&created=false"
+                             "&mentioned=false&review_requested=false"
+                             "&reviewed=false&limit=100"))
+         (start-time (current-time))
+         issues total-processed total-errors)
+    
+    ;; Performance optimizations
+    (let ((org-element-use-cache nil)
+          (font-lock-mode nil)
+          (inhibit-modification-hooks t)
+          (gc-cons-threshold most-positive-fixnum)
+          (gc-cons-percentage 0.6))
+      
+      ;; Initialize log buffer
+      (with-current-buffer (get-buffer-create "*Sync Process Log*")
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert "=== Forgejo Synchronization Report ===\n")
+          (insert (format "Time: %s\n" (current-time-string)))
+          (insert (format "Instance: %s\n" ip-forgejo-current-instance))
+          (insert (format "Base URL: %s\n\n" base-url))))
+      
+      (ip-forgejo--log 'info "Starting synchronization...")
+      (ip-forgejo--log 'info "Search URL: %s" search-url)
+      
+      (condition-case err
+          (progn
+            (setq issues (ip-forgejo--api search-url nil force-refresh))
+            (if issues
+                (progn
+                  (ip-forgejo--log 'success "Retrieved %d issues" (length issues))
+                  
+                  ;; Process issues in batches
+                  (let ((batches (seq-partition issues ip-forgejo-batch-size))
+                        (batch-num 0))
+                    (setq total-processed 0
+                          total-errors 0)
+                    
+                    (dolist (batch batches)
+                      (cl-incf batch-num)
+                      (ip-forgejo--log 'info "Processing batch %d/%d (%d issues)" 
+                                       batch-num (length batches) (length batch))
+                      
+                      (let ((result (ip-forgejo--process-issues-batch batch)))
+                        (cl-incf total-processed (car result))
+                        (cl-incf total-errors (cdr result)))))
+                  
+                  (let ((duration (float-time (time-since start-time))))
+                    (ip-forgejo--log 'success "Sync complete: %d processed, %d errors (%.2fs)" 
+                                     total-processed total-errors duration)))
+              
+              (ip-forgejo--log 'warning "No issues received from API")))
+        
+        (error
+         (ip-forgejo--log 'error "Synchronization failed: %s" (error-message-string err))
+         (user-error "Synchronization failed: %s" (error-message-string err))))
+      
+      ;; Show log buffer
+      (display-buffer "*Sync Process Log*")
+      
+      ;; Restore GC settings
+      (run-with-idle-timer 1 nil (lambda () (garbage-collect)))
+      
+      (message "Sync complete: %d issues processed" (or total-processed 0)))))
+
+(provide 'ip-forgejo)
+;;; ip-forgejo.el ends here
