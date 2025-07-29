@@ -456,6 +456,7 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                       (progn
                         (ip-debug-log 'info 'invoice "Using custom template: %s" ip-invoice-template-file)
                         (with-temp-buffer
+                          (set-buffer-file-coding-system 'utf-8) ; Указываем UTF-8 для чтения
                           (insert-file-contents ip-invoice-template-file)
                           (buffer-string)))
                     (if (eq (plist-get invoice :type) 'task)
@@ -501,11 +502,12 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
     (ip-debug-log 'debug 'invoice "Invoice data for Mustache: %S" data)
     (condition-case err
         (with-temp-file output-file
+          (set-buffer-file-coding-system 'utf-8) ; Указываем UTF-8 для записи
           (let ((rendered (mustache-render template data)))
             (ip-debug-log 'debug 'invoice "Mustache render output length: %d" (length rendered))
             (ip-debug-log 'debug 'invoice "Rendered content: %s" rendered)
             (insert rendered)
-            (write-region (point-min) (point-max) output-file nil 'silent) ; Ensure file is written
+            (write-region (point-min) (point-max) output-file nil 'silent) ; Явная запись
             (ip-debug-log 'success 'invoice "HTML invoice generated: %s" output-file)))
       (error
        (ip-debug-log 'error 'invoice "Failed to generate HTML: %s" (error-message-string err))
