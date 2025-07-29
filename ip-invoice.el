@@ -15,6 +15,27 @@
 (require 'mustache)
 (require 'subr-x)
 
+;; Try to load ip-debug, provide fallbacks if not available
+(condition-case nil
+    (require 'ip-debug)
+  (error
+   ;; Define fallback functions if ip-debug is not available
+   (defun ip-debug-log (level module message &rest args)
+     "Fallback logging function that uses `message'."
+     (let ((formatted-msg (apply #'format message args))
+           (level-str (pcase level
+                        ('info "INFO")
+                        ('success "SUCCESS")
+                        ('warning "WARNING") 
+                        ('error "ERROR")
+                        (_ "DEBUG")))
+           (module-str (upcase (symbol-name module))))
+       (message "[%s/%s] %s" module-str level-str formatted-msg)))
+   
+   (defmacro ip-debug (module message &rest args)
+     "Fallback debug macro that uses `message'."
+     `(ip-debug-log 'info ,module ,message ,@args))))
+
 ;; Customization variables
 (defgroup ip-invoice nil
   "Invoice generation for IP management system."
@@ -114,10 +135,11 @@
               (format-time-string "%Y-%m-%d"
                                   (org-time-string-to-time raw-value))
             (progn
-              (message "Invalid timestamp: %S" ts)
+              (ip-debug-log 'warning 'invoice "Invalid timestamp: %S" ts)
               nil)))
-      (error (message "Invalid timestamp: %S" ts)
-             nil))))
+      (error 
+       (ip-debug-log 'error 'invoice "Invalid timestamp: %S" ts)
+       nil))))
 
 (defun ip--task-total-hours (task)
   "Calculate total clocked hours in TASK."
@@ -161,26 +183,35 @@
              (title (org-element-property :raw-value task))
              (hours (ip--task-total-hours task)))
         (list :title title :client client :service service :hours hours))
-    (error (message "Error parsing task: %s" (error-message-string err))
-           nil)))
+    (error 
+     (ip-debug-log 'error 'invoice "Error parsing task: %s" (error-message-string err))
+     nil)))
 
 (defun ip--load-tasks-in-range (start end)
   "Return list of tasks as plists, filtered by clock range."
-  (let ((ast (ip--load-org-file ip-tasks-file)))
-    (cl-loop for hl in (org-element-map ast 'headline #'identity)
-             when (ip--task-in-range-p hl start end)
-             collect (ip--parse-task hl))))
+  (ip-debug-log 'info 'invoice "Loading tasks in range %s to %s" start end)
+  (let ((ast (ip--load-org-file ip-tasks-file))
+        (count 0))
+    (prog1
+        (cl-loop for hl in (org-element-map ast 'headline #'identity)
+                 when (ip--task-in-range-p hl start end)
+                 do (cl-incf count)
+                 collect (ip--parse-task hl))
+      (ip-debug-log 'success 'invoice "Loaded %d tasks in date range" count))))
 
 (defun ip--generate-final-invoice-id ()
   "Generate next available final invoice ID based on existing files."
   (unless (file-directory-p ip-invoice-final-dir)
-    (make-directory ip-invoice-final-dir t))
+    (make-directory ip-invoice-final-dir t)
+    (ip-debug-log 'info 'invoice "Created final invoice directory: %s" ip-invoice-final-dir))
   (let* ((files (directory-files ip-invoice-final-dir nil "^invoice-\\([0-9]+\\)\\.org$"))
          (nums (mapcar (lambda (f)
                          (string-to-number (cadr (split-string f "[-.]"))))
                        files))
-         (next (1+ (apply #'max 0 nums))))
-    (format "INV-2025-%04d" next)))
+         (next (1+ (apply #'max 0 nums)))
+         (invoice-id (format "INV-2025-%04d" next)))
+    (ip-debug-log 'info 'invoice "Generated invoice ID: %s" invoice-id)
+    invoice-id))
 
 (defun ip--get-task-clock-entries (task start end)
   "Get clock entries for TASK within START and END date range."
@@ -201,7 +232,6 @@
                   :date (format-time-string "%Y-%m-%d" clock-start)
                   :hours (/ (float-time (time-subtract clock-end clock-start)) 3600.0))))))))
 
-
 (defun ip--parse-task-detailed (task)
   "Extract detailed info from TASK headline including all clock entries."
   (condition-case err
@@ -210,20 +240,29 @@
              (service (or (cdr (assoc-string "REPO" props t)) "general"))
              (title (org-element-property :raw-value task)))
         (list :title title :client client :service service :element task))
-    (error (message "Error parsing task: %s" (error-message-string err))
-           nil)))
+    (error 
+     (ip-debug-log 'error 'invoice "Error parsing detailed task: %s" (error-message-string err))
+     nil)))
 
 (defun ip--load-tasks-detailed (start end)
   "Return list of tasks with detailed clock info, filtered by clock range."
-  (let ((ast (ip--load-org-file ip-tasks-file)))
-    (cl-loop for hl in (org-element-map ast 'headline #'identity)
-             when (ip--task-in-range-p hl start end)
-             collect (ip--parse-task-detailed hl))))
+  (ip-debug-log 'info 'invoice "Loading detailed tasks in range %s to %s" start end)
+  (let ((ast (ip--load-org-file ip-tasks-file))
+        (count 0))
+    (prog1
+        (cl-loop for hl in (org-element-map ast 'headline #'identity)
+                 when (ip--task-in-range-p hl start end)
+                 do (cl-incf count)
+                 collect (ip--parse-task-detailed hl))
+      (ip-debug-log 'success 'invoice "Loaded %d detailed tasks in date range" count))))
 
 (defun ip-generate-invoice-data (client-id start end &optional state invoice-type)
   "Generate invoice data for CLIENT-ID between START and END.
 INVOICE-TYPE can be \\='service (default) or \\='task."
+  (ip-debug-log 'info 'invoice "Generating invoice for client %s (%s to %s, type: %s)" 
+                client-id start end (or invoice-type 'service))
   (unless (ip-get-client-by-id client-id)
+    (ip-debug-log 'error 'invoice "Unknown client ID: %s" client-id)
     (error "Unknown client ID: %s" client-id))
   (let* ((invoice-type (or invoice-type ip-invoice-type))
          (client (ip-get-client-by-id client-id))
@@ -235,6 +274,7 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
     (cond
      ;; Service-based invoice (original logic)
      ((eq invoice-type 'service)
+      (ip-debug-log 'info 'invoice "Processing service-based invoice")
       (let* ((tasks (ip--load-tasks-in-range start end))
              (filtered (cl-remove-if-not (lambda (task)
                                            (and task (string= (plist-get task :client) client-id)))
@@ -242,6 +282,7 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
              (grouped (make-hash-table :test 'equal))
              (services ())
              (subtotal 0.0))
+        (ip-debug-log 'info 'invoice "Found %d tasks for client %s" (length filtered) client-id)
         ;; Group tasks by service
         (dolist (task filtered)
           (let ((service (or (plist-get task :service) "general")))
@@ -261,11 +302,15 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                                  :rate (format "%.2f" rate)
                                  :amount (format "%.2f" amount)
                                  :taxable taxable)
-                           services)))
+                           services)
+                     (ip-debug-log 'info 'invoice "Service %s: %.2f hours @ %.2f = %.2f" 
+                                   svc hours rate amount)))
                  grouped)
         ;; Calculate taxes and total
         (let* ((tax-amount (if tax-rate (* subtotal (/ tax-rate 100.0)) 0.0))
                (total (+ subtotal tax-amount)))
+          (ip-debug-log 'success 'invoice "Service invoice generated: subtotal %.2f, tax %.2f, total %.2f" 
+                        subtotal tax-amount total)
           (list :client client
                 :start start
                 :end end
@@ -281,12 +326,14 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
 
      ;; Task-based invoice (new logic)
      ((eq invoice-type 'task)
+      (ip-debug-log 'info 'invoice "Processing task-based invoice")
       (let* ((tasks (ip--load-tasks-detailed start end))
              (filtered (cl-remove-if-not (lambda (task)
                                            (and task (string= (plist-get task :client) client-id)))
                                          tasks))
              (task-entries ())
              (subtotal 0.0))
+        (ip-debug-log 'info 'invoice "Found %d detailed tasks for client %s" (length filtered) client-id)
         ;; Process each task's clock entries
         (dolist (task filtered)
           (let* ((task-element (plist-get task :element))
@@ -304,13 +351,17 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                             :hours (format "%.2f" hours)
                             :rate (format "%.2f" rate)
                             :amount (format "%.2f" amount))
-                      task-entries)))))
+                      task-entries)
+                (ip-debug-log 'info 'invoice "Task entry %s: %s - %.2f hours @ %.2f = %.2f" 
+                              (plist-get entry :date) task-title hours rate amount)))))
         ;; Sort by date
         (setq task-entries (sort task-entries
                                  (lambda (a b) (string< (plist-get a :date) (plist-get b :date)))))
         ;; Calculate taxes and total
         (let* ((tax-amount (if tax-rate (* subtotal (/ tax-rate 100.0)) 0.0))
                (total (+ subtotal tax-amount)))
+          (ip-debug-log 'success 'invoice "Task invoice generated: %d entries, subtotal %.2f, tax %.2f, total %.2f" 
+                        (length task-entries) subtotal tax-amount total)
           (list :client client
                 :start start
                 :end end
@@ -324,7 +375,9 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                 :tax-amount (format "%.2f" tax-amount)
                 :total (format "%.2f" total)))))
 
-     (t (error "Unknown invoice type: %s" invoice-type)))))
+     (t 
+      (ip-debug-log 'error 'invoice "Unknown invoice type: %s" invoice-type)
+      (error "Unknown invoice type: %s" invoice-type)))))
 
 ;;;###autoload
 (defun ip-preview-invoice-text (client-id start end &optional state invoice-type)
@@ -336,6 +389,7 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
     (read-string "End date (YYYY-MM-DD): ")
     nil
     (intern (completing-read "Invoice type: " '("service" "task") nil t))))
+  (ip-debug-log 'info 'invoice "Generating text preview for client %s" client-id)
   (let* ((invoice (ip-generate-invoice-data client-id start end state invoice-type))
          (buf (get-buffer-create "*Invoice Preview*")))
     (with-current-buffer buf
@@ -386,10 +440,12 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                       (plist-get invoice :currency)))
       (goto-char (point-min))
       (read-only-mode 1))
-    (display-buffer buf)))
+    (display-buffer buf)
+    (ip-debug-log 'success 'invoice "Text preview generated successfully")))
 
 (defun ip-generate-invoice-html (invoice-data output-file)
   "Generate HTML invoice from INVOICE-DATA to OUTPUT-FILE."
+  (ip-debug-log 'info 'invoice "Generating HTML invoice: %s" output-file)
   (let* ((invoice-type (plist-get invoice-data :type))
          (template (cond
                     ((eq invoice-type 'task)
@@ -422,8 +478,14 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                      :tax-rate (plist-get invoice-data :tax-rate)
                      :tax-amount (plist-get invoice-data :tax-amount)
                      :total (plist-get invoice-data :total))))
-    (with-temp-file output-file
-      (insert (mustache-render template data)))))
+    (condition-case err
+        (progn
+          (with-temp-file output-file
+            (insert (mustache-render template data)))
+          (ip-debug-log 'success 'invoice "HTML invoice generated: %s" output-file))
+      (error
+       (ip-debug-log 'error 'invoice "Failed to generate HTML invoice: %s" (error-message-string err))
+       (error "Failed to generate HTML invoice: %s" (error-message-string err))))))
 
 ;;;###autoload
 (defun ip-create-invoice (client-id start end &optional final invoice-type)
@@ -437,6 +499,8 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
     (read-string "End date (YYYY-MM-DD): ")
     (y-or-n-p "Final invoice? ")
     (intern (completing-read "Invoice type: " '("service" "task") nil t))))
+  (ip-debug-log 'info 'invoice "Creating %s invoice for %s (%s to %s)" 
+                (if final "final" "draft") client-id start end)
   (let* ((state (if final 'final 'draft))
          (invoice-type (or invoice-type 'service))
          (invoice (ip-generate-invoice-data client-id start end state invoice-type))
@@ -447,8 +511,10 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
                                (format "%s-%s" client-id (format-time-string "%Y%m%d")))
                            type-suffix)))
     (unless (file-directory-p output-dir)
-      (make-directory output-dir t))
+      (make-directory output-dir t)
+      (ip-debug-log 'info 'invoice "Created output directory: %s" output-dir))
     (ip-generate-invoice-html invoice filename)
+    (ip-debug-log 'success 'invoice "Invoice created successfully: %s" filename)
     (message "Invoice created: %s" filename)))
 
 ;;;###autoload
@@ -460,8 +526,11 @@ INVOICE-TYPE can be \\='service (default) or \\='task."
     (read-string "Start date (YYYY-MM-DD): ")
     (read-string "End date (YYYY-MM-DD): ")
     (y-or-n-p "Final invoices? ")))
+  (ip-debug-log 'info 'invoice "Creating both invoice types for %s (%s)" 
+                client-id (if final "final" "draft"))
   (ip-create-invoice client-id start end final 'service)
   (ip-create-invoice client-id start end final 'task)
+  (ip-debug-log 'success 'invoice "Both invoices created for %s" client-id)
   (message "Both service and task invoices created for %s" client-id))
 
 (provide 'ip-invoice)

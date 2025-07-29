@@ -9,6 +9,27 @@
 (require 'cl-lib)
 (require 'subr-x)
 
+;; Try to load ip-debug, provide fallbacks if not available
+(condition-case nil
+    (require 'ip-debug)
+  (error
+   ;; Define fallback functions if ip-debug is not available
+   (defun ip-debug-log (level module message &rest args)
+     "Fallback logging function that uses `message'."
+     (let ((formatted-msg (apply #'format message args))
+           (level-str (pcase level
+                        ('info "INFO")
+                        ('success "SUCCESS")
+                        ('warning "WARNING") 
+                        ('error "ERROR")
+                        (_ "DEBUG")))
+           (module-str (upcase (symbol-name module))))
+       (message "[%s/%s] %s" module-str level-str formatted-msg)))
+   
+   (defmacro ip-debug (module message &rest args)
+     "Fallback debug macro that uses `message'."
+     `(ip-debug-log 'info ,module ,message ,@args))))
+
 (defgroup ip-core nil
   "Personal business management via Org-mode."
   :prefix "ip-"
@@ -63,7 +84,8 @@
 (defun ip--ensure-directory ()
   "Ensure IP org directory exists."
   (unless (file-directory-p ip-org-directory)
-    (make-directory ip-org-directory t)))
+    (make-directory ip-org-directory t)
+    (ip-debug-log 'info 'core "Created IP directory: %s" ip-org-directory)))
 
 (defun ip--load-org-file (filename)
   "Return parsed Org AST from FILENAME in `ip-org-directory'."
@@ -71,7 +93,9 @@
                   filename
                 (ip--get-full-path filename))))
     (unless (file-exists-p path)
+      (ip-debug-log 'error 'core "File does not exist: %s" path)
       (error "File %s does not exist" path))
+    (ip-debug-log 'info 'core "Loading org file: %s" path)
     (with-temp-buffer
       (insert-file-contents path)
       (org-element-parse-buffer))))
@@ -118,6 +142,7 @@
   "Load client data from clients file with caching."
   (let ((clients-path (ip--get-full-path ip-clients-file)))
     (when (ip--file-newer-than-cache-p clients-path ip--clients-cache-mtime)
+      (ip-debug-log 'info 'core "Reloading clients data from: %s" clients-path)
       (condition-case err
           (progn
             (setq ip--clients-cache-mtime (when (file-exists-p clients-path)
@@ -133,12 +158,13 @@
                                                 (services (ip--parse-services hl)))
                                            (append (list :NAME client-name :ID client-id)
                                                    props
-                                                   (when services (list :services services)))))))
+                                                   (when services (list :services services))))))
+                  (ip-debug-log 'success 'core "Loaded %d clients" (length ip--clients-cache)))
               (progn
-                (message "Clients file not found: %s" clients-path)
+                (ip-debug-log 'warning 'core "Clients file not found: %s" clients-path)
                 (setq ip--clients-cache nil))))
         (error
-         (message "Error loading clients data: %s" (error-message-string err))
+         (ip-debug-log 'error 'core "Error loading clients data: %s" (error-message-string err))
          (setq ip--clients-cache nil))))
     ip--clients-cache))
 
@@ -146,6 +172,7 @@
   "Load company data from company file with caching."
   (let ((company-path (ip--get-full-path ip-company-file)))
     (when (ip--file-newer-than-cache-p company-path ip--company-cache-mtime)
+      (ip-debug-log 'info 'core "Reloading company data from: %s" company-path)
       (condition-case err
           (progn
             (setq ip--company-cache-mtime (when (file-exists-p company-path)
@@ -157,15 +184,17 @@
                       (let ((props (ip--parse-properties hl)))
                         (setq ip--company-cache
                               (append (list :NAME (org-element-property :raw-value hl))
-                                      props)))
+                                      props))
+                        (ip-debug-log 'success 'core "Loaded company data: %s" 
+                                      (plist-get ip--company-cache :NAME)))
                     (progn
-                      (message "No headlines found in %s" company-path)
+                      (ip-debug-log 'warning 'core "No headlines found in %s" company-path)
                       (setq ip--company-cache nil))))
               (progn
-                (message "Company file not found: %s" company-path)
+                (ip-debug-log 'warning 'core "Company file not found: %s" company-path)
                 (setq ip--company-cache nil))))
         (error
-         (message "Error loading company data: %s" (error-message-string err))
+         (ip-debug-log 'error 'core "Error loading company data: %s" (error-message-string err))
          (setq ip--company-cache nil))))
     ip--company-cache))
 
@@ -175,7 +204,8 @@ If REFRESH is non-nil, force reload from file."
   (ip--ensure-directory)
   (when refresh
     (setq ip--clients-cache nil
-          ip--clients-cache-mtime nil))
+          ip--clients-cache-mtime nil)
+    (ip-debug-log 'info 'core "Force refreshing clients cache"))
   (ip--load-clients-data))
 
 (defun ip-get-company-info (&optional refresh)
@@ -184,17 +214,20 @@ If REFRESH is non-nil, force reload from file."
   (ip--ensure-directory)
   (when refresh
     (setq ip--company-cache nil
-          ip--company-cache-mtime nil))
+          ip--company-cache-mtime nil)
+    (ip-debug-log 'info 'core "Force refreshing company cache"))
   (ip--load-company-data))
 
 (defun ip-get-client-by-id (client-id)
   "Get client data by CLIENT-ID."
+  (ip-debug-log 'info 'core "Looking up client: %s" client-id)
   (cl-find client-id (ip-get-clients)
            :key (lambda (c) (plist-get c :ID))
            :test 'equal))
 
 (defun ip-get-client-service (client-id service-tag)
   "Get service data for CLIENT-ID and SERVICE-TAG."
+  (ip-debug-log 'info 'core "Looking up service %s for client %s" service-tag client-id)
   (let ((client (ip-get-client-by-id client-id)))
     (when client
       (cl-find service-tag (plist-get client :services)
@@ -214,6 +247,7 @@ If REFRESH is non-nil, force reload from file."
 
 (defun ip-validate-setup ()
   "Validate that the IP system is properly set up."
+  (ip-debug-log 'info 'core "Starting IP system validation")
   (let ((issues '()))
     (unless (file-directory-p ip-org-directory)
       (push (format "Directory does not exist: %s" ip-org-directory) issues))
@@ -231,6 +265,7 @@ If REFRESH is non-nil, force reload from file."
         (push (format "Tasks file missing: %s" tasks-file) issues)))
     
     (when issues
+      (ip-debug-log 'error 'core "Setup validation failed: %s" issues)
       (error "IP system setup issues:\n%s" (mapconcat 'identity issues "\n")))
     
     ;; Try to load data
@@ -245,13 +280,17 @@ If REFRESH is non-nil, force reload from file."
                            (error-message-string err)) issues)))
     
     (if issues
-        (error "IP system validation failed:\n%s" (mapconcat 'identity issues "\n"))
+        (progn
+          (ip-debug-log 'error 'core "Data validation failed: %s" issues)
+          (error "IP system validation failed:\n%s" (mapconcat 'identity issues "\n")))
+      (ip-debug-log 'success 'core "IP system validation successful")
       (message "IP system validation successful"))))
 
 ;;;###autoload
 (defun ip-show-overview ()
   "Show summary of company and client list. Print all properties for debugging."
   (interactive)
+  (ip-debug-log 'info 'core "Generating system overview")
   (condition-case err
       (let ((company (ip-get-company-info))
             (clients (ip-get-clients)))
@@ -311,13 +350,17 @@ If REFRESH is non-nil, force reload from file."
             
             (goto-char (point-min))
             (read-only-mode 1))
-          (display-buffer (current-buffer))))
-    (error (message "Error generating overview: %s" (error-message-string err)))))
+          (display-buffer (current-buffer))
+          (ip-debug-log 'success 'core "Overview generated successfully")))
+    (error 
+     (ip-debug-log 'error 'core "Error generating overview: %s" (error-message-string err))
+     (message "Error generating overview: %s" (error-message-string err)))))
 
 ;;;###autoload
 (defun ip-setup-files ()
   "Create template files for IP system if they don't exist."
   (interactive)
+  (ip-debug-log 'info 'core "Setting up IP system files")
   (ip--ensure-directory)
   
   ;; Create company.org template
@@ -335,7 +378,7 @@ If REFRESH is non-nil, force reload from file."
         (insert ":TAX_ID: 123456789\n")
         (insert ":END:\n\n")
         (insert "Company description and notes go here.\n"))
-      (message "Created company template: %s" company-file)))
+      (ip-debug-log 'success 'core "Created company template: %s" company-file)))
   
   ;; Create clients.org template
   (let ((clients-file (ip--get-full-path ip-clients-file)))
@@ -364,7 +407,7 @@ If REFRESH is non-nil, force reload from file."
         (insert ":RATE: 80\n")
         (insert ":TAXABLE: t\n")
         (insert ":END:\n\n"))
-      (message "Created clients template: %s" clients-file)))
+      (ip-debug-log 'success 'core "Created clients template: %s" clients-file)))
   
   ;; Create tasks.org template
   (let ((tasks-file (ip--get-full-path ip-tasks-file)))
@@ -377,8 +420,9 @@ If REFRESH is non-nil, force reload from file."
         (insert "* Another Task :client1:consulting:\n")
         (insert "CLOCK: [2025-01-02 Tue 10:00]--[2025-01-02 Tue 12:00] =>  2:00\n")
         (insert "\nConsulting work description.\n\n"))
-      (message "Created tasks template: %s" tasks-file)))
+      (ip-debug-log 'success 'core "Created tasks template: %s" tasks-file)))
   
+  (ip-debug-log 'success 'core "IP system files setup completed")
   (message "IP system files created successfully!"))
 
 ;;;###autoload
@@ -389,6 +433,7 @@ If REFRESH is non-nil, force reload from file."
         ip--company-cache-mtime nil
         ip--clients-cache nil
         ip--clients-cache-mtime nil)
+  (ip-debug-log 'success 'core "All caches refreshed")
   (message "IP core cache refreshed"))
 
 (provide 'ip-core)

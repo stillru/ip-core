@@ -14,6 +14,27 @@
 (require 'org-element)
 (require 'time-date)
 
+;; Try to load ip-debug, provide fallbacks if not available
+(condition-case nil
+    (require 'ip-debug)
+  (error
+   ;; Define fallback functions if ip-debug is not available
+   (defun ip-debug-log (level module message &rest args)
+     "Fallback logging function that uses `message'."
+     (let ((formatted-msg (apply #'format message args))
+           (level-str (pcase level
+                        ('info "INFO")
+                        ('success "SUCCESS")
+                        ('warning "WARNING") 
+                        ('error "ERROR")
+                        (_ "DEBUG")))
+           (module-str (upcase (symbol-name module))))
+       (message "[%s/%s] %s" module-str level-str formatted-msg)))
+   
+   (defmacro ip-debug (module message &rest args)
+     "Fallback debug macro that uses `message'."
+     `(ip-debug-log 'info ,module ,message ,@args))))
+
 (defgroup ip-forgejo nil
   "Synchronization between local Org files and Forgejo issues."
   :group 'ip-core)
@@ -41,6 +62,7 @@
   "Return (base-url . token) for current instance."
   (let* ((instance (assoc ip-forgejo-current-instance ip-forgejo-instances)))
     (unless instance
+      (ip-debug-log 'error 'forgejo "Unknown Forgejo instance: %s" ip-forgejo-current-instance)
       (user-error "Unknown Forgejo instance: %s" ip-forgejo-current-instance))
     (let ((config (cdr instance)))
       (cons (alist-get "base-url" config nil nil #'equal)
@@ -52,7 +74,8 @@
   (interactive)
   (let ((names (mapcar 'car ip-forgejo-instances)))
     (setq ip-forgejo-current-instance
-          (completing-read "Switch to instance: " names nil t))))
+          (completing-read "Switch to instance: " names nil t))
+    (ip-debug-log 'info 'forgejo "Switched to instance: %s" ip-forgejo-current-instance)))
 
 (defun ip-forgejo--clean-body (body)
   "Remove ^M and normalize line endings."
@@ -67,8 +90,9 @@
    ((listp value) value)
    (t (list value))))
 
+;; Keep the specific Forgejo sync process buffer for detailed reports
 (defun ip-forgejo--log (level message &rest args)
-  "Log MESSAGE with LEVEL to sync process buffer."
+  "Log MESSAGE with LEVEL to sync process buffer AND unified debug system."
   (let ((formatted-msg (apply #'format message args))
         (timestamp (format-time-string "[%H:%M:%S] "))
         (icon (pcase level
@@ -77,7 +101,10 @@
                 ('warning "⚠️")
                 ('error "❌")
                 (_ "?"))))
-    (with-current-buffer (get-buffer-create "*Sync Process Log*")
+    ;; Log to unified debug system
+    (ip-debug-log level 'forgejo "%s" formatted-msg)
+    ;; Also log to specific sync process buffer for detailed reports
+    (with-current-buffer (get-buffer-create "*Forgejo Sync Report*")
       (let ((inhibit-read-only t))
         (goto-char (point-max))
         (insert (format "%s%s %s\n" timestamp icon formatted-msg))))))
@@ -105,7 +132,7 @@
          (cached (gethash url ip-forgejo--cache)))
     (when cached
       (ip-forgejo--log 'info "Cache hit: %s" url)
-      cached)
+      (cl-return-from ip-forgejo--api cached))
     (ip-forgejo--log 'info "Request: GET %s" url)
     (condition-case err
         (let* ((result
@@ -263,11 +290,13 @@
           (delete-region beg (point))
           (let ((inhibit-modification-hooks t))
             (insert entry)
-            (insert "\n")))
+            (insert "\n"))
+          (ip-forgejo--log 'success "Updated existing entry: %s" forgejo-id))
       (goto-char (point-max))
       (let ((inhibit-modification-hooks t))
         (insert entry)
-        (insert "\n\n")))))
+        (insert "\n\n"))
+      (ip-forgejo--log 'success "Inserted new entry: %s" forgejo-id))))
 
 ;;;###autoload
 (defun ip-forgejo--push-issue (forgejo-id title body state &optional repo-owner repo-name)
@@ -282,6 +311,7 @@
                        (body . ,body)
                        (state . ,state))))
     (unless (and owner repo)
+      (ip-forgejo--log 'error "Cannot determine repository owner or name for issue %d" forgejo-id)
       (error "Cannot determine repository owner or name for issue %d" forgejo-id))
     (ip-forgejo--log 'info "Pushing update to issue %d" forgejo-id)
     (request url
@@ -310,6 +340,7 @@
                              (format-time-string "%FT%T%z"
                                                  (org-time-string-to-time deadline-str)))))
     (unless (and owner repo)
+      (ip-forgejo--log 'error "Cannot determine repository owner or name for issue %d" forgejo-id)
       (error "Cannot determine repository owner or name for issue %d" forgejo-id))
     (when deadline-iso8601
       (let ((patch-data `((deadline . ,deadline-iso8601))))
@@ -338,6 +369,7 @@
          (post-data `((created . ,(format-time-string "%FT%T%z"))
                      (time . ,time-seconds))))
     (unless (and owner repo)
+      (ip-forgejo--log 'error "Cannot determine repository owner or name for issue %d" issue-id)
       (error "Cannot determine repository owner or name for issue %d" issue-id))
     (request url
       :type "POST"
@@ -355,6 +387,7 @@
 (defun ip-forgejo-list-clients ()
   "Show a list of all clients (owners) from imported issues."
   (interactive)
+  (ip-debug-log 'info 'forgejo "Listing clients from imported issues")
   (let (clients)
     (org-map-entries
      (lambda ()
@@ -369,7 +402,8 @@
         (dolist (client (seq-sort 'string< clients))
           (insert (format "- %s\n" client)))
         (goto-char (point-min))
-        (display-buffer (current-buffer))))))
+        (display-buffer (current-buffer))))
+    (ip-debug-log 'success 'forgejo "Found %d unique clients" (length clients))))
 
 ;;;###autoload
 (defun ip-forgejo-import-my-issues ()
@@ -387,14 +421,15 @@
           (font-lock-mode nil)
           (inhibit-modification-hooks t)
           (gc-cons-threshold (* 100000000 1)))
-      (with-current-buffer (get-buffer-create "*Sync Process Log*")
+      ;; Initialize sync report buffer
+      (with-current-buffer (get-buffer-create "*Forgejo Sync Report*")
         (let ((inhibit-read-only t))
           (erase-buffer)
-          (ip-forgejo--log 'info "=== Synchronization Report ===")
+          (ip-forgejo--log 'info "=== Forgejo Synchronization Report ===")
           (ip-forgejo--log 'info "Time: %s" (current-time-string))
-          (ip-forgejo--log 'info "Status: Running...")
-          (ip-forgejo--log 'info "🔧 Base URL: %s" base-url)
-          (ip-forgejo--log 'info "📋 Search URL: %s" search-url)
+          (ip-forgejo--log 'info "Instance: %s" ip-forgejo-current-instance)
+          (ip-forgejo--log 'info "Base URL: %s" base-url)
+          (ip-forgejo--log 'info "Search URL: %s" search-url)
           (condition-case err
               (progn
                 (setq issues (ip-forgejo--api search-url))
@@ -421,10 +456,11 @@
                                                 (concat (substring str 0 1000) " [...]")
                                               str)))
             (ip-forgejo--log 'info "nil (no issues)"))
-          (ip-forgejo--log 'info "=== End of Report ===")
+          (ip-forgejo--log 'info "=== Processing Issues ===")
           (goto-char (point-min))
           (display-buffer (current-buffer))))
       (unless issues
+        (ip-debug-log 'error 'forgejo "No issues received from API")
         (user-error "No issues received from API"))
       (save-excursion
         (dolist (issue issues)
@@ -465,7 +501,9 @@
             (setq title (alist-get 'title issue))
             (setq entry (ip-forgejo--format-entry issue times comments))
             (ip-forgejo--replace-or-insert-entry (alist-get 'id issue) entry)
-            (ip-forgejo--log 'success "✓ Imported: %s" title)))))))
+            (ip-forgejo--log 'success "✓ Imported: %s" title)))
+        (ip-forgejo--log 'success "=== Import Complete ===")
+        (ip-debug-log 'success 'forgejo "Import completed: %d issues processed" (length issues))))))
 
 ;;;###autoload
 (defun ip-forgejo--on-save-hook ()
@@ -476,7 +514,17 @@
     (org-back-to-heading t)
     (let ((forgejo-id (org-entry-get nil "FORGEJO_ID")))
       (when forgejo-id
+        (ip-debug-log 'info 'forgejo "Auto-syncing deadline for issue %s" forgejo-id)
         (ip-forgejo--push-deadline (string-to-number forgejo-id))))))
+
+;;;###autoload
+(defun ip-forgejo-show-sync-report ()
+  "Display the Forgejo sync report buffer."
+  (interactive)
+  (let ((buffer (get-buffer "*Forgejo Sync Report*")))
+    (if buffer
+        (display-buffer buffer)
+      (message "No sync report available. Run ip-forgejo-import-my-issues first."))))
 
 (add-hook 'org-after-save-hook 'ip-forgejo--on-save-hook)
 
