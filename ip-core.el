@@ -5,41 +5,9 @@
 ;; This module provides the foundation for the IP management system.
 
 ;;; Code:
-
-(eval-and-compile
-  ;; Define fallback logging functions to satisfy compiler
-  (unless (fboundp 'ip-debug-log)
-    (defun ip-debug-log (level module message &rest args)
-      "Fallback logging function that uses `message'.
-LEVEL is the log level (\\='info, \\='success, \\='warning, \\='error).
-MODULE is the module name (symbol).
-MESSAGE is the format string, followed by ARGS."
-      (let ((formatted-msg (apply #'format message args))
-            (level-str (pcase level
-                         ('info "INFO")
-                         ('success "SUCCESS")
-                         ('warning "WARNING")
-                         ('error "ERROR")
-                         (_ "DEBUG")))
-            (module-str (upcase (symbol-name module))))
-        (message "[%s/%s] %s" module-str level-str formatted-msg))))
-
-  (unless (fboundp 'ip-debug)
-    (defmacro ip-debug (module message &rest args)
-      "Fallback debug macro that uses `ip-debug-log'.
-MODULE is the module name (symbol).
-MESSAGE is the format string, followed by ARGS."
-      `(ip-debug-log 'info ,module ,message ,@args))))
-
 (require 'org-element)
 (require 'cl-lib)
 (require 'subr-x)
-
-;; Attempt to load ip-debug for full functionality
-(condition-case nil
-    (require 'ip-debug)
-  (error
-   (ip-debug-log 'warning 'core "Failed to load ip-debug.el, using fallback logging")))
 
 (defgroup ip-core nil
   "Personal business management via Org-mode."
@@ -120,12 +88,11 @@ MESSAGE is the format string, followed by ARGS."
     (org-element-map ast 'headline
       (lambda (hl)
         (when (= (org-element-property :level hl) target-level)
-          hl))
-      nil nil nil t)))
+          hl)))))
 
 (defun ip--parse-properties (hl)
   "Extract :PROPERTIES: from a headline as plist."
-  (let ((drawer (org-element-map hl 'property-drawer #'identity nil nil nil t)))
+  (let ((drawer (org-element-map hl 'property-drawer #'identity)))
     (if drawer
         (cl-loop for node in (org-element-contents (car drawer))
                  when (eq (org-element-type node) 'node-property)
@@ -137,7 +104,7 @@ MESSAGE is the format string, followed by ARGS."
   "Normalize NAME for matching with tags (lowercase, no spaces or special chars)."
   (when name
     (downcase
-     (replace-regexp-in-string "[^a-zA-Z0-9]" "" (string-trim name)))))
+     (replace-regexp-in-string "[^a-zA-Z0-9]" "" name))))
 
 (defun ip--parse-services (client-hl)
   "Parse services from CLIENT-HL sub-headlines."
@@ -152,8 +119,7 @@ MESSAGE is the format string, followed by ARGS."
           (append
            (list :description service-name
                  :tag tag)
-           props))))
-    nil nil nil t))
+           props))))))
 
 (defun ip--load-clients-data ()
   "Load client data from clients file with caching."
@@ -240,7 +206,7 @@ If REFRESH is non-nil, force reload from file."
   "Get client data by CLIENT-ID."
   (ip-debug-log 'info 'core "Looking up client: %s" client-id)
   (let ((client (cl-find client-id (ip-get-clients)
-                         :key (lambda (c) (plist-get c :ID))
+           :key (lambda (c) (plist-get c :ID))
                          :test 'equal)))
     (if client
         (ip-debug-log 'info 'core "Found client: %s (ID: %s)" (plist-get client :NAME) client-id)
@@ -253,7 +219,7 @@ If REFRESH is non-nil, force reload from file."
   (let ((client (ip-get-client-by-id client-id)))
     (when client
       (let ((service (cl-find service-tag (plist-get client :services)
-                              :key (lambda (s) (plist-get s :tag))
+               :key (lambda (s) (plist-get s :tag))
                               :test 'equal)))
         (if service
             (ip-debug-log 'info 'core "Found service: %s (tag: %s)" (plist-get service :description) service-tag)
