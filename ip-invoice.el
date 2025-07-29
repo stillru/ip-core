@@ -92,6 +92,7 @@ MESSAGE is the format string, followed by ARGS."
   <p>Period: {{start}} to {{end}}</p>
   <p>State: {{state}}</p>
   {{#invoice-id}}<p>Invoice ID: {{invoice-id}}</p>{{/invoice-id}}
+  {{^invoice-id}}<p>Invoice ID: Draft</p>{{/invoice-id}}
   <p>Client Address: {{client.address}}</p>
   <p>Client Email: {{client.email}}</p>
   <p>Payment Details: {{client.payment_details}}</p>
@@ -100,9 +101,15 @@ MESSAGE is the format string, followed by ARGS."
     {{#services}}
     <tr><td>{{description}}</td><td>{{hours}}</td><td>{{rate}}</td><td>{{amount}}</td></tr>
     {{/services}}
+    {{^services}}
+    <tr><td colspan=\"4\">No services recorded for this period</td></tr>
+    {{/services}}
     {{#tax-rate}}
     <tr><td colspan=\"3\">Subtotal</td><td>{{subtotal}} {{client.currency}}</td></tr>
     <tr><td colspan=\"3\">Tax ({{tax-rate}}%)</td><td>{{tax-amount}} {{client.currency}}</td></tr>
+    {{/tax-rate}}
+    {{^tax-rate}}
+    <tr><td colspan=\"3\">Subtotal</td><td>{{subtotal}} {{client.currency}}</td></tr>
     {{/tax-rate}}
     <tr><td colspan=\"3\">Total</td><td>{{total}} {{client.currency}}</td></tr>
   </table>
@@ -129,6 +136,7 @@ MESSAGE is the format string, followed by ARGS."
   <p>Period: {{start}} to {{end}}</p>
   <p>State: {{state}}</p>
   {{#invoice-id}}<p>Invoice ID: {{invoice-id}}</p>{{/invoice-id}}
+  {{^invoice-id}}<p>Invoice ID: Draft</p>{{/invoice-id}}
   <p>Client Address: {{client.address}}</p>
   <p>Client Email: {{client.email}}</p>
   <p>Payment Details: {{client.payment_details}}</p>
@@ -137,9 +145,15 @@ MESSAGE is the format string, followed by ARGS."
     {{#tasks}}
     <tr><td>{{date}}</td><td>{{description}}</td><td>{{hours}}</td><td>{{rate}}</td><td>{{amount}}</td></tr>
     {{/tasks}}
+    {{^tasks}}
+    <tr><td colspan=\"5\">No tasks recorded for this period</td></tr>
+    {{/tasks}}
     {{#tax-rate}}
     <tr><td colspan=\"4\">Subtotal</td><td>{{subtotal}} {{client.currency}}</td></tr>
     <tr><td colspan=\"4\">Tax ({{tax-rate}}%)</td><td>{{tax-amount}} {{client.currency}}</td></tr>
+    {{/tax-rate}}
+    {{^tax-rate}}
+    <tr><td colspan=\"4\">Subtotal</td><td>{{subtotal}} {{client.currency}}</td></tr>
     {{/tax-rate}}
     <tr><td colspan=\"4\">Total</td><td>{{total}} {{client.currency}}</td></tr>
   </table>
@@ -395,7 +409,7 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                 (ip-debug-log 'info 'invoice "Task entry: %s, %s, %.2f hours"
                               date title hours)
                 (push (list :date date
-                            :description title
+                            :description (encode-coding-string title 'utf-8)
                             :hours (format "%.2f" hours)
                             :rate (format "%.2f" rate)
                             :amount (format "%.2f" (* rate hours)))
@@ -469,98 +483,4 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                                 (plist-get invoice :currency))))
             (insert "- No tasks found\n"))))
         (when (plist-get invoice :tax-rate)
-          (insert (format "\nSubtotal: %s %s\n"
-                          (plist-get invoice :subtotal)
-                          (plist-get invoice :currency)))
-          (insert (format "Tax (%.2f%%): %s %s\n"
-                          (plist-get invoice :tax-rate)
-                          (plist-get invoice :tax-amount)
-                          (plist-get invoice :currency))))
-        (insert (format "Total: %s %s\n"
-                        (plist-get invoice :total)
-                        (plist-get invoice :currency))))
-      (goto-char (point-min))
-      (read-only-mode 1))
-    (display-buffer buf)
-    (ip-debug-log 'success 'invoice "Text preview generated for %s" client-id)))
-
-(defun ip-invoice--generate-html (invoice output-file)
-  "Generate HTML invoice from INVOICE data to OUTPUT-FILE."
-  (ip-debug-log 'info 'invoice "Generating HTML invoice: %s" output-file)
-  (let* ((template (if (and ip-invoice-template-file
-                           (file-exists-p ip-invoice-template-file))
-                      (with-temp-buffer
-                        (insert-file-contents ip-invoice-template-file)
-                        (buffer-string))
-                    (if (eq (plist-get invoice :type) 'task)
-                        ip-invoice-task-template
-                      ip-invoice-default-template)))
-         (data (list :invoice-id (or (plist-get invoice :invoice-id) "")
-                     :client (list :name (or (plist-get (plist-get invoice :client) :NAME) "")
-                                   :address (or (plist-get (plist-get invoice :client) :ADDRESS) "")
-                                   :email (or (plist-get (plist-get invoice :client) :EMAIL) "")
-                                   :payment_details (or (plist-get (plist-get invoice :client) :PAYMENT_DETAILS) "")
-                                   :currency (plist-get invoice :currency))
-                     :start (plist-get invoice :start)
-                     :end (plist-get invoice :end)
-                     :state (symbol-name (plist-get invoice :state))
-                     :services (or (plist-get invoice :services) ())
-                     :tasks (or (plist-get invoice :tasks) ())
-                     :subtotal (plist-get invoice :subtotal)
-                     :tax-rate (plist-get invoice :tax-rate)
-                     :tax-amount (plist-get invoice :tax-amount)
-                     :total (plist-get invoice :total))))
-    (condition-case err
-        (with-temp-file output-file
-          (insert (mustache-render template data))
-          (ip-debug-log 'success 'invoice "HTML invoice generated: %s" output-file))
-      (error
-       (ip-debug-log 'error 'invoice "Failed to generate HTML: %s" (error-message-string err))
-       (error "Failed to generate HTML: %s" (error-message-string err))))))
-
-;;;###autoload
-(defun ip-invoice-create (client-id start end &optional final invoice-type)
-  "Create invoice for CLIENT-ID from START to END.
-If FINAL is non-nil, generate a final invoice with a unique ID.
-INVOICE-TYPE is \\='service or \\='task."
-  (interactive
-   (list
-    (completing-read "Client ID: " (ip-list-client-ids))
-    (read-string "Start date (YYYY-MM-DD): ")
-    (read-string "End date (YYYY-MM-DD): ")
-    (y-or-n-p "Final invoice? ")
-    (intern (completing-read "Invoice type: " '("service" "task") nil t))))
-  (ip-debug-log 'info 'invoice "Creating %s invoice for %s (%s to %s)"
-                (if final "final" "draft") client-id start end)
-  (let* ((state (if final 'final 'draft))
-         (invoice-type (or invoice-type ip-invoice-type))
-         (invoice (ip-invoice-generate-data client-id start end state invoice-type))
-         (output-dir (if final ip-invoice-final-dir ip-invoice-draft-dir))
-         (type-suffix (if (eq invoice-type 'task) "-tasks" ""))
-         (filename (format "%sinvoice-%s%s.html" output-dir
-                           (or (plist-get invoice :invoice-id)
-                               (format "%s-%s" client-id (format-time-string "%Y%m%d")))
-                           type-suffix)))
-    (unless (file-directory-p output-dir)
-      (make-directory output-dir t)
-      (ip-debug-log 'info 'invoice "Created directory: %s" output-dir))
-    (ip-invoice--generate-html invoice filename)
-    (message "Invoice created: %s" filename)))
-
-;;;###autoload
-(defun ip-invoice-create-both (client-id start end &optional final)
-  "Create both service and task invoices for CLIENT-ID from START to END."
-  (interactive
-   (list
-    (completing-read "Client ID: " (ip-list-client-ids))
-    (read-string "Start date (YYYY-MM-DD): ")
-    (read-string "End date (YYYY-MM-DD): ")
-    (y-or-n-p "Final invoices? ")))
-  (ip-debug-log 'info 'invoice "Creating both invoices for %s (%s)"
-                client-id (if final "final" "draft"))
-  (ip-invoice-create client-id start end final 'service)
-  (ip-invoice-create client-id start end final 'task)
-  (message "Service and task invoices created for %s" client-id))
-
-(provide 'ip-invoice)
-;;; ip-invoice.el ends here
+          (insert (format "\nSubtotal: %s %
