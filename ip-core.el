@@ -109,6 +109,7 @@ MESSAGE is the format string, followed by ARGS."
       (error "File %s does not exist" path))
     (ip-debug-log 'info 'core "Loading org file: %s" path)
     (with-temp-buffer
+      (set-buffer-file-coding-system 'utf-8)
       (insert-file-contents path)
       (org-mode) ; Ensure Org-mode parsing context
       (org-element-parse-buffer))))

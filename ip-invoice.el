@@ -1,4 +1,4 @@
-;;; ip-invoice.el --- Generate invoices from org-mode tasks -*- lexical-binding: t; -*-
+;;; ip-invoice.el --- Generate invoices from org-mode tasks -*- coding: utf-8 lexical-binding: t; -*-
 
 ;;; Commentary:
 ;; This module generates invoices from org-mode tasks for the IP management system.
