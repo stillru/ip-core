@@ -91,7 +91,7 @@ MESSAGE is the format string, followed by ARGS."
   <h1>Invoice for {{client.name}}</h1>
   <p>Period: {{start}} to {{end}}</p>
   <p>State: {{state}}</p>
-  {{#if invoice-id}}<p>Invoice ID: {{invoice-id}}</p>{{/if}}
+  {{#invoice-id}}<p>Invoice ID: {{invoice-id}}</p>{{/invoice-id}}
   <p>Client Address: {{client.address}}</p>
   <p>Client Email: {{client.email}}</p>
   <p>Payment Details: {{client.payment_details}}</p>
@@ -100,10 +100,10 @@ MESSAGE is the format string, followed by ARGS."
     {{#services}}
     <tr><td>{{description}}</td><td>{{hours}}</td><td>{{rate}}</td><td>{{amount}}</td></tr>
     {{/services}}
-    {{#if tax-rate}}
+    {{#tax-rate}}
     <tr><td colspan=\"3\">Subtotal</td><td>{{subtotal}} {{client.currency}}</td></tr>
     <tr><td colspan=\"3\">Tax ({{tax-rate}}%)</td><td>{{tax-amount}} {{client.currency}}</td></tr>
-    {{/if}}
+    {{/tax-rate}}
     <tr><td colspan=\"3\">Total</td><td>{{total}} {{client.currency}}</td></tr>
   </table>
 </body>
@@ -128,7 +128,7 @@ MESSAGE is the format string, followed by ARGS."
   <h1>Invoice for {{client.name}}</h1>
   <p>Period: {{start}} to {{end}}</p>
   <p>State: {{state}}</p>
-  {{#if invoice-id}}<p>Invoice ID: {{invoice-id}}</p>{{/if}}
+  {{#invoice-id}}<p>Invoice ID: {{invoice-id}}</p>{{/invoice-id}}
   <p>Client Address: {{client.address}}</p>
   <p>Client Email: {{client.email}}</p>
   <p>Payment Details: {{client.payment_details}}</p>
@@ -137,10 +137,10 @@ MESSAGE is the format string, followed by ARGS."
     {{#tasks}}
     <tr><td>{{date}}</td><td>{{description}}</td><td>{{hours}}</td><td>{{rate}}</td><td>{{amount}}</td></tr>
     {{/tasks}}
-    {{#if tax-rate}}
+    {{#tax-rate}}
     <tr><td colspan=\"4\">Subtotal</td><td>{{subtotal}} {{client.currency}}</td></tr>
     <tr><td colspan=\"4\">Tax ({{tax-rate}}%)</td><td>{{tax-amount}} {{client.currency}}</td></tr>
-    {{/if}}
+    {{/tax-rate}}
     <tr><td colspan=\"4\">Total</td><td>{{total}} {{client.currency}}</td></tr>
   </table>
 </body>
@@ -206,47 +206,26 @@ MESSAGE is the format string, followed by ARGS."
             nil))))
      (org-element-map task 'clock #'identity nil nil nil t))))
 
-(defun ip-invoice--parse-tags (raw-title)
-  "Extract tags from RAW-TITLE, handling complex tags with underscores and hyphens."
-  (let* ((tags '())
-         (clean-title raw-title))
-    ;; Look for the tag section at the end (pattern: multiple :tag: at the end)
-    (when (string-match "\\(.*?\\)\\s-*\\(\\(?::[a-zA-Z0-9_-]+:\\)+\\)\\s-*$" raw-title)
-      (setq clean-title (string-trim (match-string 1 raw-title)))
-      (let ((tag-string (match-string 2 raw-title)))
-        ;; Extract individual tags from the tag string
-        (while (string-match ":\\([a-zA-Z0-9_-]+\\):" tag-string)
-          (push (match-string 1 tag-string) tags)
-          (setq tag-string (substring tag-string (match-end 0))))))
-    ;; If no tags found, just clean the title
-    (when (null tags)
-      (setq clean-title (string-trim raw-title)))
-    (setq tags (nreverse tags))
-    (ip-debug-log 'info 'invoice "Parsed tags from title '%s': %S, clean title: %s"
-                  raw-title tags clean-title)
-    (list :tags tags :title clean-title)))
-
 (defun ip-invoice--parse-task (task)
   "Extract task information as a plist."
+  (ip-debug-log 'debug 'invoice "Parsing task - %s" task)
   (condition-case err
-      (let* ((props (org-element-property :properties task))
-             (raw-title (org-element-property :raw-value task))
-             (parsed-tags (ip-invoice--parse-tags raw-title))
-             (tags (plist-get parsed-tags :tags))
-             (title (plist-get parsed-tags :title))
+      (let* ((raw-title (org-element-property :raw-value task))
+             (tags (org-element-property :tags task))
+             (title (string-trim raw-title))
              (client (string-trim
-                      (or (cdr (assoc-string "CLIENT" props t))
-                          (cl-find-if (lambda (tag) (member tag (ip-list-client-ids))) tags)
+                      (or (cl-find-if (lambda (tag) (member tag (ip-list-client-ids))) tags)
                           "unknown")))
              (service (string-trim
-                       (or (cdr (assoc-string "REPO" props t))
-                           (cl-find-if (lambda (tag) (member tag (ip-list-service-tags))) tags)
+                       (or (cl-find-if (lambda (tag) (member tag (ip-list-service-tags))) tags)
                            "general")))
              (hours (ip-invoice--task-hours task)))
+        (ip-debug-log 'debug 'invoice "Raw title: %S, org-tags: %S"
+                      raw-title tags)
         (when (string= client "unknown")
           (ip-debug-log 'warning 'invoice "Client ID not found for task: %s, tags: %S, using 'unknown'" title tags))
-        (ip-debug-log 'info 'invoice "Parsed task: %s, client: %s, service: %s, hours: %.2f, tags: %S, properties: %S"
-                      title client service hours tags props)
+        (ip-debug-log 'info 'invoice "Parsed task: %s, client: %s, service: %s, hours: %.2f, tags: %S"
+                      title client service hours tags)
         (list :client client :service service :title title :hours hours :element task))
     (error
      (ip-debug-log 'error 'invoice "Error parsing task: %s" (error-message-string err))
