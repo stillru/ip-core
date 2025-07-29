@@ -5,30 +5,41 @@
 ;; This module provides the foundation for the IP management system.
 
 ;;; Code:
+
+(eval-and-compile
+  ;; Define fallback logging functions to satisfy compiler
+  (unless (fboundp 'ip-debug-log)
+    (defun ip-debug-log (level module message &rest args)
+      "Fallback logging function that uses `message'.
+LEVEL is the log level (\\='info, \\='success, \\='warning, \\='error).
+MODULE is the module name (symbol).
+MESSAGE is the format string, followed by ARGS."
+      (let ((formatted-msg (apply #'format message args))
+            (level-str (pcase level
+                         ('info "INFO")
+                         ('success "SUCCESS")
+                         ('warning "WARNING")
+                         ('error "ERROR")
+                         (_ "DEBUG")))
+            (module-str (upcase (symbol-name module))))
+        (message "[%s/%s] %s" module-str level-str formatted-msg))))
+
+  (unless (fboundp 'ip-debug)
+    (defmacro ip-debug (module message &rest args)
+      "Fallback debug macro that uses `ip-debug-log'.
+MODULE is the module name (symbol).
+MESSAGE is the format string, followed by ARGS."
+      `(ip-debug-log 'info ,module ,message ,@args))))
+
 (require 'org-element)
 (require 'cl-lib)
 (require 'subr-x)
 
-;; Try to load ip-debug, provide fallbacks if not available
+;; Attempt to load ip-debug for full functionality
 (condition-case nil
     (require 'ip-debug)
   (error
-   ;; Define fallback functions if ip-debug is not available
-   (defun ip-debug-log (level module message &rest args)
-     "Fallback logging function that uses `message'."
-     (let ((formatted-msg (apply #'format message args))
-           (level-str (pcase level
-                        ('info "INFO")
-                        ('success "SUCCESS")
-                        ('warning "WARNING") 
-                        ('error "ERROR")
-                        (_ "DEBUG")))
-           (module-str (upcase (symbol-name module))))
-       (message "[%s/%s] %s" module-str level-str formatted-msg)))
-   
-   (defmacro ip-debug (module message &rest args)
-     "Fallback debug macro that uses `message'."
-     `(ip-debug-log 'info ,module ,message ,@args))))
+   (ip-debug-log 'warning 'core "Failed to load ip-debug.el, using fallback logging")))
 
 (defgroup ip-core nil
   "Personal business management via Org-mode."
@@ -92,12 +103,14 @@
   (let ((path (if (file-name-absolute-p filename)
                   filename
                 (ip--get-full-path filename))))
+    (ip-debug-log 'info 'core "Checking file existence: %s" path)
     (unless (file-exists-p path)
       (ip-debug-log 'error 'core "File does not exist: %s" path)
       (error "File %s does not exist" path))
     (ip-debug-log 'info 'core "Loading org file: %s" path)
     (with-temp-buffer
       (insert-file-contents path)
+      (org-mode) ; Ensure Org-mode parsing context
       (org-element-parse-buffer))))
 
 (defun ip--get-headlines (ast &optional level)
@@ -106,11 +119,12 @@
     (org-element-map ast 'headline
       (lambda (hl)
         (when (= (org-element-property :level hl) target-level)
-          hl)))))
+          hl))
+      nil nil nil t)))
 
 (defun ip--parse-properties (hl)
   "Extract :PROPERTIES: from a headline as plist."
-  (let ((drawer (org-element-map hl 'property-drawer #'identity)))
+  (let ((drawer (org-element-map hl 'property-drawer #'identity nil nil nil t)))
     (if drawer
         (cl-loop for node in (org-element-contents (car drawer))
                  when (eq (org-element-type node) 'node-property)
@@ -122,7 +136,7 @@
   "Normalize NAME for matching with tags (lowercase, no spaces or special chars)."
   (when name
     (downcase
-     (replace-regexp-in-string "[^a-zA-Z0-9]" "" name))))
+     (replace-regexp-in-string "[^a-zA-Z0-9]" "" (string-trim name)))))
 
 (defun ip--parse-services (client-hl)
   "Parse services from CLIENT-HL sub-headlines."
@@ -133,10 +147,12 @@
                (props (ip--parse-properties sub-hl))
                (tag (or (plist-get props :TAG)
                         (ip--normalize-tag service-name))))
+          (ip-debug-log 'info 'core "Parsed service: %s, tag: %s" service-name tag)
           (append
            (list :description service-name
                  :tag tag)
-           props))))))
+           props))))
+    nil nil nil t))
 
 (defun ip--load-clients-data ()
   "Load client data from clients file with caching."
@@ -156,6 +172,7 @@
                                                 (client-id (or (plist-get props :ID)
                                                                (ip--normalize-tag client-name)))
                                                 (services (ip--parse-services hl)))
+                                           (ip-debug-log 'info 'core "Loaded client: %s (ID: %s)" client-name client-id)
                                            (append (list :NAME client-name :ID client-id)
                                                    props
                                                    (when services (list :services services))))))
@@ -221,18 +238,26 @@ If REFRESH is non-nil, force reload from file."
 (defun ip-get-client-by-id (client-id)
   "Get client data by CLIENT-ID."
   (ip-debug-log 'info 'core "Looking up client: %s" client-id)
-  (cl-find client-id (ip-get-clients)
-           :key (lambda (c) (plist-get c :ID))
-           :test 'equal))
+  (let ((client (cl-find client-id (ip-get-clients)
+                         :key (lambda (c) (plist-get c :ID))
+                         :test 'equal)))
+    (if client
+        (ip-debug-log 'info 'core "Found client: %s (ID: %s)" (plist-get client :NAME) client-id)
+      (ip-debug-log 'warning 'core "Client not found: %s" client-id))
+    client))
 
 (defun ip-get-client-service (client-id service-tag)
   "Get service data for CLIENT-ID and SERVICE-TAG."
   (ip-debug-log 'info 'core "Looking up service %s for client %s" service-tag client-id)
   (let ((client (ip-get-client-by-id client-id)))
     (when client
-      (cl-find service-tag (plist-get client :services)
-               :key (lambda (s) (plist-get s :tag))
-               :test 'equal))))
+      (let ((service (cl-find service-tag (plist-get client :services)
+                              :key (lambda (s) (plist-get s :tag))
+                              :test 'equal)))
+        (if service
+            (ip-debug-log 'info 'core "Found service: %s (tag: %s)" (plist-get service :description) service-tag)
+          (ip-debug-log 'warning 'core "Service not found: %s for client %s" service-tag client-id))
+        service))))
 
 (defun ip-list-client-ids ()
   "Return list of all client IDs."
@@ -415,9 +440,17 @@ If REFRESH is non-nil, force reload from file."
       (with-temp-file tasks-file
         (insert "#+TITLE: Tasks\n\n")
         (insert "* Example Task :client1:dev:\n")
+        (insert ":PROPERTIES:\n")
+        (insert ":CLIENT: client1\n")
+        (insert ":REPO: dev\n")
+        (insert ":END:\n")
         (insert "CLOCK: [2025-01-01 Mon 09:00]--[2025-01-01 Mon 17:00] =>  8:00\n")
         (insert "\nTask description goes here.\n\n")
         (insert "* Another Task :client1:consulting:\n")
+        (insert ":PROPERTIES:\n")
+        (insert ":CLIENT: client1\n")
+        (insert ":REPO: consulting\n")
+        (insert ":END:\n")
         (insert "CLOCK: [2025-01-02 Tue 10:00]--[2025-01-02 Tue 12:00] =>  2:00\n")
         (insert "\nConsulting work description.\n\n"))
       (ip-debug-log 'success 'core "Created tasks template: %s" tasks-file)))

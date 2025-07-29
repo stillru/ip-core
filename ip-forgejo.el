@@ -9,6 +9,32 @@
 
 ;;; Code:
 
+(eval-and-compile
+  ;; Define fallback logging functions to satisfy compiler
+  (unless (fboundp 'ip-debug-log)
+    (defun ip-debug-log (level module message &rest args)
+      "Fallback logging function that uses `message'.
+LEVEL is the log level (\\='info, \\='success, \\='warning, \\='error).
+MODULE is the module name (symbol).
+MESSAGE is the format string, followed by ARGS."
+      (let ((formatted-msg (apply #'format message args))
+            (level-str (pcase level
+                         ('info "INFO")
+                         ('success "SUCCESS")
+                         ('warning "WARNING")
+                         ('error "ERROR")
+                         (_ "DEBUG")))
+            (module-str (upcase (symbol-name module))))
+        (message "[%s/%s] %s" module-str level-str formatted-msg))))
+
+  (unless (fboundp 'ip-debug)
+    (defmacro ip-debug (module message &rest args)
+      "Fallback debug macro that uses `ip-debug-log'.
+MODULE is the module name (symbol).
+MESSAGE is the format string, followed by ARGS."
+      `(ip-debug-log 'info ,module ,message ,@args))))
+
+
 (require 'request)
 (require 'org)
 (require 'org-element)
@@ -219,7 +245,7 @@
             (ip-forgejo--ensure-list comments))))
       (string-join formatted-comments "\n"))))
 
-(defun ip-forgejo--format-entry (issue times comments)
+(defun ip-forgejo--format-entry (issue times)
   "Format a single ISSUE with TIMES, COMMENTS, and metadata into an Org heading."
   (let* ((title (alist-get 'title issue))
          (number (alist-get 'number issue))
@@ -229,15 +255,12 @@
          (owner-data (alist-get 'owner (alist-get 'repository issue)))
          (owner-name (if (stringp owner-data) owner-data (alist-get 'login owner-data)))
          (repo-name (alist-get 'name (alist-get 'repository issue)))
-         (milestone (let ((m (alist-get 'milestone issue)))
-                      (if m (alist-get 'title m) "")))
          (id (alist-get 'id issue))
          (body (ip-forgejo--clean-body (or (alist-get 'body issue) "")))
          (total-time (cl-reduce #'+ (mapcar (lambda (e) (alist-get 'time e 0))
                                             (ip-forgejo--ensure-list times))
                                 :initial-value 0))
          (logbook (ip-forgejo--format-logbook times))
-         (formatted-comments (ip-forgejo--format-comments comments))
          (org-id (org-id-new))
          ;; Generate Forgejo issue URL
          (base-url (car (ip-forgejo--current-config)))
@@ -255,17 +278,12 @@
          (scheduled-str (when created (format "SCHEDULED: <%s>" (ip-forgejo--format-org-timestamp created))))
          (deadline-str (when due-date (format "DEADLINE: <%s>" (ip-forgejo--format-org-timestamp due-date))))
          ;; Build the entry
-         (properties-str (format ":PROPERTIES:\n:ID: %s\n:FORGEJO_ID: %s\n:FORGEJO_NUM: %s\n:FORGEJO_URL: %s\n:STATE: %s\n:CLIENT: %s\n:REPO: %s\n:MILESTONE: %s\n:TIME: %d\n:END:"
-                                 org-id id number issue-url state owner-name repo-name milestone total-time))
+         (properties-str (format ":PROPERTIES:\n:ID: %s\n:FORGEJO_ID: %s\n:FORGEJO_NUM: %s\n:FORGEJO_URL: %s\n:STATE: %s\n:CLIENT: %s\n:REPO: %s\n:TIME: %d\n:END:"
+                                 org-id id number issue-url state owner-name repo-name total-time))
          (logbook-block (if (string-empty-p logbook)
                             ""
                           (format ":LOGBOOK:\n%s\n:END:" logbook)))
-         ;; Combine body and comments
-         (main-content (string-join
-                        (seq-filter #'identity
-                                    (list body
-                                          (unless (string-empty-p formatted-comments) formatted-comments)))
-                        "\n\n")))
+         (main-content (string-join (list body))))
     (format "* %s %s%s\n%s\n%s\n%s\n%s\n\n%s"
             todo title tags-str
             (or scheduled-str "")
@@ -499,7 +517,7 @@
                (ip-forgejo--log 'warning "Failed to fetch comments for #%d: %s" index (error-message-string err))
                (setq comments nil)))
             (setq title (alist-get 'title issue))
-            (setq entry (ip-forgejo--format-entry issue times comments))
+            (setq entry (ip-forgejo--format-entry issue times))
             (ip-forgejo--replace-or-insert-entry (alist-get 'id issue) entry)
             (ip-forgejo--log 'success "✓ Imported: %s" title)))
         (ip-forgejo--log 'success "=== Import Complete ===")
