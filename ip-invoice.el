@@ -83,6 +83,14 @@ Should be a plist with keys like:
   :type 'plist
   :group 'ip-invoice)
 
+(defcustom ip-invoice-template-choice 'enhanced
+  "Choice of template to use for invoices.
+Possible values: \='default, \='enhanced, or \='file."
+  :type '(choice (const :tag "Default template" default)
+                 (const :tag "Enhanced template" enhanced)
+                 (const :tag "Custom template file" file))
+  :group 'ip-invoice)
+
 (defcustom ip-invoice-exchange-rate nil
   "EUR to RSD exchange rate. If nil, no conversion is shown."
   :type '(choice (number :tag "Exchange rate")
@@ -102,143 +110,143 @@ Should be a plist with keys like:
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
     <title>Invoice {{invoice-id}}</title>
     <style>
-        body { 
-            font-family: Arial, sans-serif; 
-            margin: 0; 
-            padding: 20px; 
-            background: #f5f5f5; 
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
         }
-        .invoice-container { 
-            max-width: 800px; 
-            margin: 0 auto; 
-            background: white; 
-            padding: 40px; 
-            box-shadow: 0 0 10px rgba(0,0,0,0.1); 
+        .invoice-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
         }
-        .header { 
-            display: flex; 
-            justify-content: space-between; 
-            margin-bottom: 30px; 
-            align-items: flex-start; 
+        .header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+            align-items: flex-start;
         }
-        .company-info h1 { 
-            margin: 0 0 10px 0; 
-            color: #2c3e50; 
+        .company-info h1 {
+            margin: 0 0 10px 0;
+            color: #2c3e50;
         }
-        .company-info p { 
-            margin: 5px 0; 
-            color: #666; 
+        .company-info p {
+            margin: 5px 0;
+            color: #666;
         }
-        .client-info { 
-            text-align: right; 
+        .client-info {
+            text-align: right;
         }
-        .client-info p { 
-            margin: 5px 0; 
-            color: #666; 
+        .client-info p {
+            margin: 5px 0;
+            color: #666;
         }
-        .details { 
-            display: flex; 
-            justify-content: space-between; 
-            margin-bottom: 30px; 
-            padding: 20px; 
-            background: #f8f9fa; 
-            border-radius: 5px; 
+        .details {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 5px;
         }
-        .details p { 
-            margin: 5px 0; 
+        .details p {
+            margin: 5px 0;
         }
-        table { 
-            width: 100%; 
-            border-collapse: collapse; 
-            margin-bottom: 30px; 
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
         }
-        th, td { 
-            border: 1px solid #ddd; 
-            padding: 12px; 
-            text-align: left; 
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
         }
-        th { 
-            background-color: #34495e; 
-            color: white; 
-            font-weight: bold; 
+        th {
+            background-color: #34495e;
+            color: white;
+            font-weight: bold;
         }
-        tr:nth-child(even) { 
-            background-color: #f2f2f2; 
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
         }
-        tr.total { 
-            background-color: #e8f4fd; 
-            font-weight: bold; 
+        tr.total {
+            background-color: #e8f4fd;
+            font-weight: bold;
         }
-        .total { 
-            text-align: right; 
-            margin-bottom: 30px; 
+        .total {
+            text-align: right;
+            margin-bottom: 30px;
         }
-        .total p { 
-            margin: 5px 0; 
-            font-size: 16px; 
+        .total p {
+            margin: 5px 0;
+            font-size: 16px;
         }
-        .payment-slip { 
-            border: 2px solid #000; 
-            margin: 30px 0; 
-            font-size: 12px; 
+        .payment-slip {
+            border: 2px solid #000;
+            margin: 30px 0;
+            font-size: 12px;
         }
-        .payment-slip .row { 
-            display: flex; 
-            border-bottom: 1px solid #000; 
+        .payment-slip .row {
+            display: flex;
+            border-bottom: 1px solid #000;
         }
-        .payment-slip .row:last-child { 
-            border-bottom: none; 
+        .payment-slip .row:last-child {
+            border-bottom: none;
         }
-        .payment-slip .col { 
-            border-right: 1px solid #000; 
-            padding: 8px; 
-            flex: 1; 
+        .payment-slip .col {
+            border-right: 1px solid #000;
+            padding: 8px;
+            flex: 1;
         }
-        .payment-slip .col:last-child { 
-            border-right: none; 
+        .payment-slip .col:last-child {
+            border-right: none;
         }
-        .payment-slip label { 
-            display: block; 
-            font-weight: bold; 
-            margin-bottom: 5px; 
-            font-size: 10px; 
+        .payment-slip label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            font-size: 10px;
         }
-        .payment-slip .uplatilac { 
-            flex: 2; 
+        .payment-slip .uplatilac {
+            flex: 2;
         }
-        .payment-slip .svrha { 
-            flex: 2; 
+        .payment-slip .svrha {
+            flex: 2;
         }
-        .payment-slip .primalac { 
-            flex: 2; 
+        .payment-slip .primalac {
+            flex: 2;
         }
-        .payment-slip .potpis { 
-            flex: 2; 
+        .payment-slip .potpis {
+            flex: 2;
         }
-        .payment-slip .qr { 
-            flex: 1; 
-            text-align: center; 
+        .payment-slip .qr {
+            flex: 1;
+            text-align: center;
         }
-        .payment-slip .qr img { 
-            max-width: 80px; 
-            max-height: 80px; 
+        .payment-slip .qr img {
+            max-width: 80px;
+            max-height: 80px;
         }
-        .potpis-line { 
-            border-bottom: 1px solid #000; 
-            height: 20px; 
-            margin: 10px 0; 
+        .potpis-line {
+            border-bottom: 1px solid #000;
+            height: 20px;
+            margin: 10px 0;
         }
-        .payment-slip em { 
-            font-size: 10px; 
-            color: #666; 
+        .payment-slip em {
+            font-size: 10px;
+            color: #666;
         }
-        .footer { 
-            text-align: center; 
-            margin-top: 30px; 
-            padding-top: 20px; 
-            border-top: 1px solid #ddd; 
-            color: #666; 
-            font-size: 12px; 
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            color: #666;
+            font-size: 12px;
         }
         @media print {
             body { background: white; }
@@ -610,16 +618,22 @@ Should be a plist with keys like:
   (condition-case err
       (let* ((raw-title (org-element-property :raw-value task))
              (tags (org-element-property :tags task))
-             (title (string-trim raw-title))
+             (clean-title (replace-regexp-in-string ":[^:]+:" "" raw-title)) ; Remove embedded tags
+             (title (string-trim clean-title))
              (client (string-trim
                       (or (cl-find-if (lambda (tag) (member tag (ip-list-client-ids))) tags)
+                          (and (string-match ":maketv:" raw-title) "maketv")
                           "unknown")))
              (service (string-trim
                        (or (cl-find-if (lambda (tag) (member tag (ip-list-service-tags))) tags)
+                           (and (member "documentation" tags) "documentation")
+                           (and (member "infrastructure" tags) "infrastructure")
                            "general")))
              (hours (ip-invoice--task-hours task)))
-        (ip-debug-log 'debug 'invoice "Raw title: %S, org-tags: %S"
-                      raw-title tags)
+        (when (string-match ":[^:]+:" raw-title)
+          (ip-debug-log 'warn 'invoice "Malformed task title with embedded tags: %s" raw-title))
+        (ip-debug-log 'debug 'invoice "Raw title: %S, cleaned title: %S, org-tags: %S"
+                      raw-title title tags)
         (when (string= client "unknown")
           (ip-debug-log 'warning 'invoice "Client ID not found for task: %s, tags: %S, using 'unknown'" title tags))
         (ip-debug-log 'info 'invoice "Parsed task: %s, client: %s, service: %s, hours: %.2f, tags: %S"
@@ -704,9 +718,11 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
          (tax-rate (or (string-to-number (or (plist-get client :TAX_RATE) "0")) 0.0))
          (default-rate (string-to-number (or (plist-get client :DEFAULT_RATE) "0")))
          (invoice-type (or invoice-type ip-invoice-type))
-         (invoice-id (when (eq state 'final) (ip-invoice--generate-invoice-id))))
-    (ip-debug-log 'info 'invoice "Client: %s, currency: %s, tax-rate: %.2f, default-rate: %.2f"
-                  client-name currency tax-rate default-rate)
+         (invoice-id (if (eq state 'final)
+                         (ip-invoice--generate-invoice-id)
+                       (format "DRAFT-%s-%s" client-id (format-time-string "%Y%m%d")))))
+    (ip-debug-log 'info 'invoice "Client: %s, currency: %s, tax-rate: %.2f, default-rate: %.2f, invoice-id: %s"
+                  client-name currency tax-rate default-rate invoice-id)
     (cond
      ((eq invoice-type 'service)
       (ip-debug-log 'info 'invoice "Generating service-based invoice")
@@ -762,7 +778,6 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                 :tax-rate tax-rate
                 :tax-amount (format "%.2f" tax-amount)
                 :total (format "%.2f" (+ subtotal tax-amount))))))
-
      ((eq invoice-type 'task)
       (ip-debug-log 'info 'invoice "Generating task-based invoice")
       (let* ((tasks (ip-invoice--load-tasks start end))
@@ -813,7 +828,6 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                 :tax-rate tax-rate
                 :tax-amount (format "%.2f" tax-amount)
                 :total (format "%.2f" (+ subtotal tax-amount))))))
-
      (t
       (ip-debug-log 'error 'invoice "Unknown invoice type: %s" invoice-type)
       (error "Unknown invoice type: %s" invoice-type)))))
@@ -837,68 +851,126 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
 
 (defun ip-invoice--generate-html (invoice output-file)
   "Generate HTML invoice from INVOICE data to OUTPUT-FILE."
-  (ip-debug-log 'info 'invoice "Generating HTML invoice: %s" output-file)
-  (let* ((template (if (and ip-invoice-template-file
-                           (file-exists-p ip-invoice-template-file))
-                      (progn
-                        (ip-debug-log 'info 'invoice "Using custom template: %s" ip-invoice-template-file)
-                        (with-temp-buffer
-                          (set-buffer-file-coding-system 'utf-8) ; Указываем UTF-8 для чтения
-                          (insert-file-contents ip-invoice-template-file)
-                          (buffer-string)))
-                    (if (eq (plist-get invoice :type) 'task)
-                        (progn
-                          (ip-debug-log 'info 'invoice "Using task template")
-                          ip-invoice-task-template)
-                      (progn
-                        (ip-debug-log 'info 'invoice "Using default template")
-                        ip-invoice-enhanced-template))))
-         (data (ip-invoice--convert-plist-to-mustache-data
-                (list
-                 :invoice-id (or (plist-get invoice :invoice-id) "")
-                 :client (list
-                          :name (encode-coding-string (or (plist-get (plist-get invoice :client) :NAME) "Unknown Client") 'utf-8)
-                          :address (encode-coding-string (or (plist-get (plist-get invoice :client) :ADDRESS) "N/A") 'utf-8)
-                          :email (encode-coding-string (or (plist-get (plist-get invoice :client) :EMAIL) "N/A") 'utf-8)
-                          :payment_details (encode-coding-string (or (plist-get (plist-get invoice :client) :PAYMENT_DETAILS) "N/A") 'utf-8)
-                          :currency (encode-coding-string (or (plist-get invoice :currency) "EUR") 'utf-8))
-                 :start (encode-coding-string (or (plist-get invoice :start) "N/A") 'utf-8)
-                 :end (encode-coding-string (or (plist-get invoice :end) "N/A") 'utf-8)
-                 :state (encode-coding-string (or (symbol-name (plist-get invoice :state)) "draft") 'utf-8)
-                 :services (mapcar
-                            (lambda (svc)
-                              (list
-                               :description (encode-coding-string (plist-get svc :description) 'utf-8)
-                               :hours (encode-coding-string (plist-get svc :hours) 'utf-8)
-                               :rate (encode-coding-string (plist-get svc :rate) 'utf-8)
-                               :amount (encode-coding-string (plist-get svc :amount) 'utf-8)))
-                            (or (plist-get invoice :services) ()))
-                 :tasks (mapcar
-                         (lambda (task)
+  (condition-case err
+      (progn
+        ;; Validate inputs
+        (unless (and (listp invoice) (plist-get invoice :invoice-id))
+          (error "Invalid invoice data: missing :invoice-id"))
+        (unless (file-writable-p output-file)
+          (error "Output file %s is not writable" output-file))
+        (ip-debug-log 'info 'invoice "Generating HTML invoice: %s" output-file)
+        (ip-debug-log 'debug 'invoice "Services count: %d" (length (or (plist-get invoice :services) ())))
+        (ip-debug-log 'debug 'invoice "Tasks count: %d" (length (or (plist-get invoice :tasks) ())))
+        
+        ;; Construct data for Mustache template
+        (let* ((template (pcase ip-invoice-template-choice
+                           ('file (if (and ip-invoice-template-file
+                                           (file-readable-p ip-invoice-template-file))
+                                      (with-temp-buffer
+                                        (insert-file-contents ip-invoice-template-file)
+                                        (buffer-string))
+                                    (ip-debug-log 'warn 'invoice "Template file %s not readable, using fallback"
+                                                  ip-invoice-template-file)
+                                    ip-invoice-enhanced-template))
+                           ('default ip-invoice-default-template)
+                           (_ ip-invoice-enhanced-template)))
+               (company-data (or (ip-get-company-info)
+                                 (progn
+                                   (ip-debug-log 'warn 'invoice "Company data not found, using defaults")
+                                   (list :NAME "Default Company" :ADDRESS "N/A" :EMAIL "N/A"))))
+               (client-data (or (plist-get invoice :client)
+                                (error "Missing client data in invoice")))
+               (base-data (list
+                           :invoice-id (or (plist-get invoice :invoice-id) "")
+                           :client (list
+                                    :name (or (plist-get client-data :NAME) "Unknown Client")
+                                    :address (or (plist-get client-data :ADDRESS) "N/A")
+                                    :email (or (plist-get client-data :EMAIL) "N/A")
+                                    :payment_details (or (plist-get client-data :PAYMENT_DETAILS) "N/A")
+                                    :currency (or (plist-get invoice :currency) "EUR")
+                                    :default_rate (or (plist-get client-data :DEFAULT_RATE) "0"))
+                           :company (list
+                                     :name (or (plist-get company-data :NAME) "My Company")
+                                     :address (or (plist-get company-data :ADDRESS) "N/A")
+                                     :email (or (plist-get company-data :EMAIL) "N/A")
+                                     :pib (or (plist-get company-data :TAX_ID) "N/A")
+                                     :iban (or (plist-get company-data :IBAN) "N/A")
+                                     :model (or (plist-get company-data :MODEL) "97")
+                                     :poziv_base (or (plist-get company-data :POZIV_BASE) "123-456")
+                                     :logo (or (plist-get company-data :LOGO) nil))
+                           :start (or (plist-get invoice :start) "N/A")
+                           :end (or (plist-get invoice :end) "N/A")
+                           :state (or (symbol-name (plist-get invoice :state)) "draft")
+                           :generated (format-time-string "%Y-%m-%d")
+                           :due_date (or (plist-get invoice :due_date)
+                                         (format-time-string "%Y-%m-%d" (time-add (current-time) (days-to-time 14))))
+                           :exchange_rate (when ip-invoice-exchange-rate
+                                            (format "%.2f" ip-invoice-exchange-rate))
+                           :payment_slip ip-invoice-include-payment-slip))
+               (services-data (when (eq (plist-get invoice :type) 'service)
+                                ;; Validate and map services
+                                (mapc (lambda (svc)
+                                        (unless (listp svc)
+                                          (error "Invalid service data: %S" svc)))
+                                      (or (plist-get invoice :services) ()))
+                                (mapcar (lambda (svc)
+                                          (list
+                                           :description (or (plist-get svc :description) "")
+                                           :hours (or (plist-get svc :hours) "0.00")
+                                           :rate (or (plist-get svc :rate) "0.00")
+                                           :amount (or (plist-get svc :amount) "0.00")))
+                                        (or (plist-get invoice :services) ()))))
+               (tasks-data (when (eq (plist-get invoice :type) 'task)
+                             ;; Validate and map tasks
+                             (mapc (lambda (task)
+                                     (unless (listp task)
+                                       (error "Invalid task data: %S" task)))
+                                   (or (plist-get invoice :tasks) ()))
+                             (mapcar (lambda (task)
+                                       (list
+                                        :date (or (plist-get task :date) "")
+                                        :description (or (plist-get task :description) "")
+                                        :hours (or (plist-get task :hours) "0.00")
+                                        :rate (or (plist-get task :rate) "0.00")
+                                        :amount (or (plist-get task :amount) "0.00")))
+                                     (or (plist-get invoice :tasks) ()))))
+               (tax-data (when (plist-get invoice :tax-rate)
                            (list
-                            :date (encode-coding-string (plist-get task :date) 'utf-8)
-                            :description (encode-coding-string (plist-get task :description) 'utf-8)
-                            :hours (encode-coding-string (plist-get task :hours) 'utf-8)
-                            :rate (encode-coding-string (plist-get task :rate) 'utf-8)
-                            :amount (encode-coding-string (plist-get task :amount) 'utf-8)))
-                         (or (plist-get invoice :tasks) ()))
-                 :subtotal (encode-coding-string (or (plist-get invoice :subtotal) "0.00") 'utf-8)
-                 :tax-rate (or (plist-get invoice :tax-rate) 0)
-                 :tax-amount (encode-coding-string (or (plist-get invoice :tax-amount) "0.00") 'utf-8)
-                 :total (encode-coding-string (or (plist-get invoice :total) "0.00") 'utf-8)))))
-    (ip-debug-log 'debug 'invoice "Invoice data for Mustache: %S" data)
-    (condition-case err
-        (with-temp-file output-file
-          (set-buffer-file-coding-system 'utf-8) ; Указываем UTF-8 для записи
-          (let ((rendered (mustache-render template data)))
-            (ip-debug-log 'debug 'invoice "Mustache render output length: %d" (length rendered))
-            (ip-debug-log 'debug 'invoice "Rendered content: %s" rendered)
-            (insert rendered)
-            (write-region (point-min) (point-max) output-file nil 'silent) ; Явная запись
-            (ip-debug-log 'success 'invoice "HTML invoice generated: %s" output-file)))
-      (error
-       (ip-debug-log 'error 'invoice "Failed to generate HTML: %s" (error-message-string err))
-       (error "Failed to generate HTML: %s" (error-message-string err))))))
+                            :tax-rate (plist-get invoice :tax-rate)
+                            :tax-amount (or (plist-get invoice :tax-amount) "0.00"))))
+               (total-data (list
+                            :subtotal (or (plist-get invoice :subtotal) "0.00")
+                            :total (or (plist-get invoice :total) "0.00")
+                            :total_rsd (when (and ip-invoice-exchange-rate
+                                                  (plist-get invoice :total))
+                                         (format "%.2f" (* (string-to-number (plist-get invoice :total))
+                                                           ip-invoice-exchange-rate)))))
+               (data (append base-data
+                             (when services-data (list :services services-data))
+                             (when tasks-data (list :tasks tasks-data))
+                             (when tax-data (list :tax-rate (plist-get tax-data :tax-rate)
+                                                  :tax-amount (plist-get tax-data :tax-amount)))
+                             total-data)))
+          (ip-debug-log 'debug 'invoice "Invoice data structure: %S" data)
+          ;; Write to file
+          (with-temp-file output-file
+            (set-buffer-file-coding-system 'utf-8)
+            (insert (mustache-render template data)))
+          (ip-debug-log 'info 'invoice "Successfully generated HTML invoice: %s" output-file)))
+    (error
+     (ip-debug-log 'error 'invoice "Failed to generate HTML: %s" (error-message-string err))
+     (error "Failed to generate HTML invoice: %s" (error-message-string err)))))
+
+
+;;;###autoload
+(defun ip-invoice-select-template ()
+  "Select invoice template to use."
+  (interactive)
+  (let ((choice (completing-read "Select template: "
+                                 '("default" "enhanced" "file")
+                                 nil t)))
+    (setq ip-invoice-template-choice (intern choice))
+    (message "Selected template: %s" choice)))
 
 ;;;###autoload
 (defun ip-invoice-preview-text (client-id start end &optional state invoice-type)
@@ -976,22 +1048,30 @@ INVOICE-TYPE is \\='service or \\='task."
     (read-string "End date (YYYY-MM-DD): ")
     (y-or-n-p "Final invoice? ")
     (intern (completing-read "Invoice type: " '("service" "task") nil t))))
-  (ip-debug-log 'info 'invoice "Creating %s invoice for %s (%s to %s)"
-                (if final "final" "draft") client-id start end)
-  (let* ((state (if final 'final 'draft))
-         (invoice-type (or invoice-type ip-invoice-type))
-         (invoice (ip-invoice-generate-data client-id start end state invoice-type))
-         (output-dir (if final ip-invoice-final-dir ip-invoice-draft-dir))
-         (type-suffix (if (eq invoice-type 'task) "-tasks" ""))
-         (filename (format "%sinvoice-%s%s.html" output-dir
-                           (or (plist-get invoice :invoice-id)
-                               (format "%s-%s" client-id (format-time-string "%Y%m%d")))
-                           type-suffix)))
-    (unless (file-directory-p output-dir)
-      (make-directory output-dir t)
-      (ip-debug-log 'info 'invoice "Created directory: %s" output-dir))
-    (ip-invoice--generate-html invoice filename)
-    (message "Invoice created: %s" filename)))
+  (condition-case err
+      (let* ((state (if final 'final 'draft))
+             (invoice-type (or invoice-type ip-invoice-type))
+             (invoice (ip-invoice-generate-data client-id start end state invoice-type))
+             (output-dir (if final ip-invoice-final-dir ip-invoice-draft-dir))
+             (type-suffix (if (eq invoice-type 'task) "-tasks" ""))
+             (filename (format "%sinvoice-%s%s.html" output-dir
+                               (or (plist-get invoice :invoice-id)
+                                   (format "%s-%s" client-id (format-time-string "%Y%m%d")))
+                               type-suffix)))
+        (ip-debug-log 'info 'invoice "Creating %s invoice for %s (%s to %s)"
+                      (if final "final" "draft") client-id start end)
+        (ip-debug-log 'debug 'invoice "Invoice data: %S" invoice)
+        (unless (file-directory-p output-dir)
+          (make-directory output-dir t)
+          (ip-debug-log 'info 'invoice "Created directory: %s" output-dir))
+        (ip-invoice--generate-html invoice filename)
+        (message "Invoice created: %s" filename)
+        filename) ; Return the filename for further processing
+    (error
+     (ip-debug-log 'error 'invoice "Failed to create invoice for %s: %s"
+                   client-id (error-message-string err))
+     (message "Error creating invoice for %s: %s" client-id (error-message-string err))
+     nil))) ; Return nil to indicate failure
 
 ;;;###autoload
 (defun ip-invoice-create-both (client-id start end &optional final)
