@@ -207,17 +207,24 @@ MESSAGE is the format string, followed by ARGS."
      (org-element-map task 'clock #'identity nil nil nil t))))
 
 (defun ip-invoice--parse-tags (raw-title)
-  "Extract tags from RAW-TITLE, handling malformed tags."
-  (let* ((tag-regexp ":[a-zA-Z0-9_]+:")
-         (tags (when (string-match tag-regexp raw-title)
-                 (split-string
-                  (replace-regexp-in-string ":" ""
-                                            (replace-regexp-in-string "\\s*:[-a-zA-Z0-9_]+:\\s*" "\\1" raw-title))
-                  "\\s+")))
-         (clean-title (replace-regexp-in-string tag-regexp "" raw-title)))
+  "Extract tags from RAW-TITLE, handling complex tags with underscores and hyphens."
+  (let* ((tags '())
+         (clean-title raw-title))
+    ;; Look for the tag section at the end (pattern: multiple :tag: at the end)
+    (when (string-match "\\(.*?\\)\\s-*\\(\\(?::[a-zA-Z0-9_-]+:\\)+\\)\\s-*$" raw-title)
+      (setq clean-title (string-trim (match-string 1 raw-title)))
+      (let ((tag-string (match-string 2 raw-title)))
+        ;; Extract individual tags from the tag string
+        (while (string-match ":\\([a-zA-Z0-9_-]+\\):" tag-string)
+          (push (match-string 1 tag-string) tags)
+          (setq tag-string (substring tag-string (match-end 0))))))
+    ;; If no tags found, just clean the title
+    (when (null tags)
+      (setq clean-title (string-trim raw-title)))
+    (setq tags (nreverse tags))
     (ip-debug-log 'info 'invoice "Parsed tags from title '%s': %S, clean title: %s"
                   raw-title tags clean-title)
-    (list :tags (or tags '()) :title clean-title)))
+    (list :tags tags :title clean-title)))
 
 (defun ip-invoice--parse-task (task)
   "Extract task information as a plist."
