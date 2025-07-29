@@ -5,6 +5,7 @@
 ;; Supports service-based and task-based invoices using org-mode clock entries.
 ;; Integrates with ip-core.el for client data and ip-debug.el for logging.
 ;; Outputs HTML invoices using mustache.el templates.
+;; Enhanced with Serbian invoice format support.
 
 ;;; Code:
 
@@ -72,6 +73,392 @@ MESSAGE is the format string, followed by ARGS."
   "Default invoice type: \\='service (group by services) or \\='task (group by tasks)."
   :type '(choice (const :tag "Group by services" service)
                  (const :tag "Group by tasks" task))
+  :group 'ip-invoice)
+
+;; Serbian invoice format customizations
+(defcustom ip-invoice-company-info nil
+  "Company information for invoices.
+Should be a plist with keys like:
+:name, :address, :email, :pib, :maticni_broj, :iban, :model, :poziv_base, :logo"
+  :type 'plist
+  :group 'ip-invoice)
+
+(defcustom ip-invoice-exchange-rate nil
+  "EUR to RSD exchange rate. If nil, no conversion is shown."
+  :type '(choice (number :tag "Exchange rate")
+                 (const :tag "No conversion" nil))
+  :group 'ip-invoice)
+
+(defcustom ip-invoice-include-payment-slip nil
+  "Whether to include Serbian payment slip in invoices."
+  :type 'boolean
+  :group 'ip-invoice)
+
+(defcustom ip-invoice-enhanced-template
+  "<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+    <title>Invoice {{invoice-id}}</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: #f5f5f5; 
+        }
+        .invoice-container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 40px; 
+            box-shadow: 0 0 10px rgba(0,0,0,0.1); 
+        }
+        .header { 
+            display: flex; 
+            justify-content: space-between; 
+            margin-bottom: 30px; 
+            align-items: flex-start; 
+        }
+        .company-info h1 { 
+            margin: 0 0 10px 0; 
+            color: #2c3e50; 
+        }
+        .company-info p { 
+            margin: 5px 0; 
+            color: #666; 
+        }
+        .client-info { 
+            text-align: right; 
+        }
+        .client-info p { 
+            margin: 5px 0; 
+            color: #666; 
+        }
+        .details { 
+            display: flex; 
+            justify-content: space-between; 
+            margin-bottom: 30px; 
+            padding: 20px; 
+            background: #f8f9fa; 
+            border-radius: 5px; 
+        }
+        .details p { 
+            margin: 5px 0; 
+        }
+        table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin-bottom: 30px; 
+        }
+        th, td { 
+            border: 1px solid #ddd; 
+            padding: 12px; 
+            text-align: left; 
+        }
+        th { 
+            background-color: #34495e; 
+            color: white; 
+            font-weight: bold; 
+        }
+        tr:nth-child(even) { 
+            background-color: #f2f2f2; 
+        }
+        tr.total { 
+            background-color: #e8f4fd; 
+            font-weight: bold; 
+        }
+        .total { 
+            text-align: right; 
+            margin-bottom: 30px; 
+        }
+        .total p { 
+            margin: 5px 0; 
+            font-size: 16px; 
+        }
+        .payment-slip { 
+            border: 2px solid #000; 
+            margin: 30px 0; 
+            font-size: 12px; 
+        }
+        .payment-slip .row { 
+            display: flex; 
+            border-bottom: 1px solid #000; 
+        }
+        .payment-slip .row:last-child { 
+            border-bottom: none; 
+        }
+        .payment-slip .col { 
+            border-right: 1px solid #000; 
+            padding: 8px; 
+            flex: 1; 
+        }
+        .payment-slip .col:last-child { 
+            border-right: none; 
+        }
+        .payment-slip label { 
+            display: block; 
+            font-weight: bold; 
+            margin-bottom: 5px; 
+            font-size: 10px; 
+        }
+        .payment-slip .uplatilac { 
+            flex: 2; 
+        }
+        .payment-slip .svrha { 
+            flex: 2; 
+        }
+        .payment-slip .primalac { 
+            flex: 2; 
+        }
+        .payment-slip .potpis { 
+            flex: 2; 
+        }
+        .payment-slip .qr { 
+            flex: 1; 
+            text-align: center; 
+        }
+        .payment-slip .qr img { 
+            max-width: 80px; 
+            max-height: 80px; 
+        }
+        .potpis-line { 
+            border-bottom: 1px solid #000; 
+            height: 20px; 
+            margin: 10px 0; 
+        }
+        .payment-slip em { 
+            font-size: 10px; 
+            color: #666; 
+        }
+        .footer { 
+            text-align: center; 
+            margin-top: 30px; 
+            padding-top: 20px; 
+            border-top: 1px solid #ddd; 
+            color: #666; 
+            font-size: 12px; 
+        }
+        @media print {
+            body { background: white; }
+            .invoice-container { box-shadow: none; }
+        }
+    </style>
+</head>
+<body>
+    <div class=\"invoice-container\">
+        <div class=\"header\">
+            <div>
+                {{#company.logo}}
+                <img src=\"{{company.logo}}\" alt=\"{{company.name}}\" style=\"max-width: 150px;\">
+                {{/company.logo}}
+                {{^company.logo}}
+                <div style=\"width: 150px; height: 60px; border: 1px dashed #ccc; display: flex; align-items: center; justify-content: center; color: #999;\">Logo</div>
+                {{/company.logo}}
+            </div>
+            <div class=\"company-info\">
+                <h1>{{company.name}}</h1>
+                <p>{{company.address}}</p>
+                <p>Email: {{company.email}}</p>
+                {{#company.pib}}<p>PIB: {{company.pib}} | Matični broj: {{company.maticni_broj}}</p>{{/company.pib}}
+                {{#company.iban}}<p>Tekući račun: {{company.iban}}</p>{{/company.iban}}
+            </div>
+            <div class=\"client-info\">
+                <p><strong>{{client.name}}</strong></p>
+                <p>{{client.address}}</p>
+                <p>Email: {{client.email}}</p>
+                <p>{{client.payment_details}}</p>
+            </div>
+        </div>
+
+        <div class=\"details\">
+            <div>
+                {{#invoice-id}}
+                <p><strong>Račun br.:</strong> {{invoice-id}}{{#agreement}} na osnovu ugovora {{agreement}}{{/agreement}}</p>
+                {{/invoice-id}}
+                {{^invoice-id}}
+                <p><strong>Račun br.:</strong> Draft{{#agreement}} na osnovu ugovora {{agreement}}{{/agreement}}</p>
+                {{/invoice-id}}
+                <p><strong>Period:</strong> {{start}} - {{end}}</p>
+                <p><strong>Datum izdavanja:</strong> {{generated}}</p>
+                {{#due_date}}<p><strong>Rok dospeća:</strong> {{due_date}}</p>{{/due_date}}
+            </div>
+            <div>
+                {{#exchange_rate}}
+                <p><strong>Devizni kurs:</strong> 1 EUR = {{exchange_rate}} RSD</p>
+                {{/exchange_rate}}
+                <p><strong>Mesto izdavanja:</strong> {{company.address}}</p>
+                <p><strong>Status:</strong> {{state}}</p>
+            </div>
+        </div>
+
+        {{#services}}
+        <table>
+            <thead>
+                <tr>
+                    <th>Service Description</th>
+                    <th>Hours</th>
+                    <th>Rate ({{client.currency}})</th>
+                    <th>Amount ({{client.currency}})</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{#services}}
+                <tr>
+                    <td>{{description}}</td>
+                    <td>{{hours}}</td>
+                    <td>{{rate}}</td>
+                    <td>{{amount}}</td>
+                </tr>
+                {{/services}}
+                {{^services}}
+                <tr>
+                    <td colspan=\"4\">No services recorded for this period</td>
+                </tr>
+                {{/services}}
+                {{#tax-rate}}
+                <tr>
+                    <td colspan=\"3\"><strong>Subtotal</strong></td>
+                    <td><strong>{{subtotal}} {{client.currency}}</strong></td>
+                </tr>
+                <tr>
+                    <td colspan=\"3\"><strong>Tax ({{tax-rate}}%)</strong></td>
+                    <td><strong>{{tax-amount}} {{client.currency}}</strong></td>
+                </tr>
+                {{/tax-rate}}
+                <tr class=\"total\">
+                    <td colspan=\"3\"><strong>Total</strong></td>
+                    <td><strong>{{total}} {{client.currency}}</strong></td>
+                </tr>
+            </tbody>
+        </table>
+        {{/services}}
+
+        {{#tasks}}
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Task Description</th>
+                    <th>Hours</th>
+                    <th>Rate ({{client.currency}})</th>
+                    <th>Amount ({{client.currency}})</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{#tasks}}
+                <tr>
+                    <td>{{date}}</td>
+                    <td>{{description}}</td>
+                    <td>{{hours}}</td>
+                    <td>{{rate}}</td>
+                    <td>{{amount}}</td>
+                </tr>
+                {{/tasks}}
+                {{^tasks}}
+                <tr>
+                    <td colspan=\"5\">No tasks recorded for this period</td>
+                </tr>
+                {{/tasks}}
+                {{#tax-rate}}
+                <tr>
+                    <td colspan=\"4\"><strong>Subtotal</strong></td>
+                    <td><strong>{{subtotal}} {{client.currency}}</strong></td>
+                </tr>
+                <tr>
+                    <td colspan=\"4\"><strong>Tax ({{tax-rate}}%)</strong></td>
+                    <td><strong>{{tax-amount}} {{client.currency}}</strong></td>
+                </tr>
+                {{/tax-rate}}
+                <tr class=\"total\">
+                    <td colspan=\"4\"><strong>Total</strong></td>
+                    <td><strong>{{total}} {{client.currency}}</strong></td>
+                </tr>
+            </tbody>
+        </table>
+        {{/tasks}}
+
+        <div class=\"total\">
+            {{#client.default_rate}}<p><strong>Rate:</strong> {{client.currency}}{{client.default_rate}}/hour</p>{{/client.default_rate}}
+            <p><strong>Total Amount:</strong> {{total}} {{client.currency}}</p>
+            {{#total_rsd}}<p><strong>Total Amount (RSD):</strong> {{total_rsd}} RSD</p>{{/total_rsd}}
+        </div>
+
+        {{#payment_slip}}
+        <div class=\"payment-slip\">
+            <div class=\"row\">
+                <div class=\"col uplatilac\">
+                    <label>Uplatilac</label>
+                    <div>{{client.name}}<br>{{client.address}}</div>
+                </div>
+                <div class=\"col shifra\">
+                    <label>Šifra plaćanja</label>
+                    <div>189</div>
+                </div>
+                <div class=\"col valuta\">
+                    <label>Valuta</label>
+                    <div>RSD</div>
+                </div>
+                <div class=\"col iznos\">
+                    <label>Iznos</label>
+                    <div>{{total_rsd}}</div>
+                </div>
+            </div>
+
+            <div class=\"row\">
+                <div class=\"col svrha\">
+                    <label>Svrha uplate</label>
+                    <div>Račun {{invoice-id}} za {{period}}</div>
+                </div>
+                <div class=\"col racun\">
+                    <label>Račun primaoca</label>
+                    <div>{{company.iban}}</div>
+                </div>
+            </div>
+
+            <div class=\"row\">
+                <div class=\"col primalac\">
+                    <label>Primalac</label>
+                    <div>{{company.name}}<br>{{company.address}}</div>
+                </div>
+                <div class=\"col model\">
+                    <label>Model</label>
+                    <div>{{company.model}}</div>
+                </div>
+                <div class=\"col poziv\">
+                    <label>Poziv na broj</label>
+                    <div>{{company.poziv_base}}-{{period}}-{{invoice-id}}</div>
+                </div>
+            </div>
+
+            <div class=\"row bottom\">
+                <div class=\"col potpis\">
+                    <label>Datum i potpis nalogodavca:</label>
+                    <div class=\"potpis-line\"></div>
+                    <em>Račun važi bez pečata i potpisa</em>
+                </div>
+                <div class=\"col qr\">
+                    <label>NBS IPS QR</label>
+                    {{#qr_code}}
+                    <img src=\"data:image/png;base64,{{qr_code}}\" alt=\"QR kod\">
+                    {{/qr_code}}
+                    {{^qr_code}}
+                    <div style=\"width: 80px; height: 80px; border: 1px dashed #ccc; display: flex; align-items: center; justify-content: center; font-size: 10px;\">QR</div>
+                    {{/qr_code}}
+                </div>
+            </div>
+        </div>
+        {{/payment_slip}}
+
+        <div class=\"footer\">
+            <p>Generated on {{generated}} | Thank you for your business!</p>
+        </div>
+    </div>
+</body>
+</html>"
+  "Enhanced HTML template with Serbian invoice format support."
+  :type 'string
   :group 'ip-invoice)
 
 (defcustom ip-invoice-default-template
@@ -465,7 +852,7 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                           ip-invoice-task-template)
                       (progn
                         (ip-debug-log 'info 'invoice "Using default template")
-                        ip-invoice-default-template))))
+                        ip-invoice-enhanced-template))))
          (data (ip-invoice--convert-plist-to-mustache-data
                 (list
                  :invoice-id (or (plist-get invoice :invoice-id) "")
