@@ -717,6 +717,27 @@ Possible values: \='default, \='enhanced, or \='file."
              nil))))
       nil nil nil t)))
 
+(defun ip-invoice--normalize-data (invoice)
+  "Normalize INVOICE data for Mustache template compatibility."
+  (let ((normalized invoice))
+    ;; Convert string "nil" to Lisp nil
+    (when (string= (plist-get normalized :exchange_rate) "nil")
+      (plist-put normalized :exchange_rate nil))
+    (when (string= (plist-get normalized :total_rsd) "nil")
+      (plist-put normalized :total_rsd nil))
+    ;; Convert string "t" to t
+    (when (string= (plist-get normalized :payment_slip) "t")
+      (plist-put normalized :payment_slip t))
+    ;; Ensure numbers are numbers
+    (when (stringp (plist-get normalized :exchange_rate))
+      (plist-put normalized :exchange_rate (string-to-number (plist-get normalized :exchange_rate))))
+    (when (stringp (plist-get normalized :total_rsd))
+      (plist-put normalized :total_rsd (string-to-number (plist-get normalized :total_rsd))))
+    ;; Add period (e.g., "2025-07") for payment slip
+    (when-let ((start (plist-get normalized :start)))
+      (plist-put normalized :period (format-time-string "%Y-%m" (org-time-string-to-time start))))
+    normalized))
+
 ;;; Core Functions
 (defun ip-invoice-generate-data (client-id start end &optional state invoice-type)
   "Generate invoice data for CLIENT-ID from START to END.
@@ -795,55 +816,66 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                 :tax-amount (format "%.2f" tax-amount)
                 :total (format "%.2f" (+ subtotal tax-amount))))))
      ((eq invoice-type 'task)
-      (ip-debug-log 'info 'invoice "Generating task-based invoice")
-      (let* ((tasks (ip-invoice--load-tasks start end))
-             (filtered (cl-remove-if-not
-                        (lambda (task)
-                          (let ((valid (and task (string= (string-trim (plist-get task :client)) client-id)
-                                            (> (plist-get task :hours) 0))))
-                            (ip-debug-log 'info 'invoice "Filtering task: %s, client: %s, hours: %.2f, valid: %S"
-                                          (plist-get task :title) (plist-get task :client)
-                                          (plist-get task :hours) valid)
-                            valid))
-                        tasks))
-             (task-entries ())
-             (subtotal 0.0))
-        (ip-debug-log 'info 'invoice "Found %d tasks for %s" (length filtered) client-id)
-        ;; Process task clock entries
-        (dolist (task filtered)
-          (when-let ((service (string-trim (plist-get task :service)))
-                     (title (plist-get task :title))
-                     (element (plist-get task :element))
-                     (svc-data (ip-get-client-service client-id service))
-                     (rate (string-to-number (or (plist-get svc-data :RATE)
-                                                 (plist-get client :DEFAULT_RATE)
-                                                 "0"))))
-            (dolist (entry (ip-invoice--get-task-clock-entries element start end))
-              (let ((hours (plist-get entry :hours))
-                    (date (plist-get entry :date)))
-                (ip-debug-log 'info 'invoice "Task entry: %s, %s, %.2f hours"
-                              date title hours)
-                (push (list :date date
-                            :description (encode-coding-string title 'utf-8)
-                            :hours (format "%.2f" hours)
-                            :rate (format "%.2f" rate)
-                            :amount (format "%.2f" (* rate hours)))
-                      task-entries)
-                (setq subtotal (+ subtotal (* rate hours)))))))
-        (let ((tax-amount (* subtotal (/ tax-rate 100.0))))
-          (list :client (plist-put client :NAME client-name)
-                :start start
-                :end end
-                :state (or state 'draft)
-                :invoice-id invoice-id
-                :type 'task
-                :currency currency
-                :tasks (sort task-entries
-                             (lambda (a b) (string< (plist-get a :date) (plist-get b :date))))
-                :subtotal (format "%.2f" subtotal)
-                :tax-rate tax-rate
-                :tax-amount (format "%.2f" tax-amount)
-                :total (format "%.2f" (+ subtotal tax-amount))))))
+ (ip-debug-log 'info 'invoice "Generating task-based invoice")
+ (let* ((tasks (ip-invoice--load-tasks start end))
+        (filtered (cl-remove-if-not
+                   (lambda (task)
+                     (let ((valid (and task (string= (string-trim (plist-get task :client)) client-id)
+                                       (> (plist-get task :hours) 0))))
+                       (ip-debug-log 'info 'invoice "Filtering task: %s, client: %s, hours: %.2f, valid: %S"
+                                     (plist-get task :title) (plist-get task :client)
+                                     (plist-get task :hours) valid)
+                       valid))
+                   tasks))
+        (task-entries ())
+        (subtotal 0.0))
+   (ip-debug-log 'info 'invoice "Found %d tasks for %s" (length filtered) client-id)
+   ;; Process task clock entries
+   (dolist (task filtered)
+     (when-let ((service (string-trim (plist-get task :service)))
+                (title (plist-get task :title))
+                (element (plist-get task :element))
+                (svc-data (ip-get-client-service client-id service))
+                (rate (string-to-number (or (plist-get svc-data :RATE)
+                                            (plist-get client :DEFAULT_RATE)
+                                            "0"))))
+       (dolist (entry (ip-invoice--get-task-clock-entries element start end))
+         (let ((hours (plist-get entry :hours))
+               (date (plist-get entry :date)))
+           (ip-debug-log 'info 'invoice "Task entry: %s, %s, %.2f hours"
+                         date title hours)
+           (push (list :date date
+                       :description (encode-coding-string title 'utf-8)
+                       :hours (format "%.2f" hours)
+                       :rate (format "%.2f" rate)
+                       :amount (format "%.2f" (* rate hours)))
+                 task-entries)
+           (setq subtotal (+ subtotal (* rate hours)))))))
+   (let* ((tax-amount (* subtotal (/ tax-rate 100.0)))
+          (total-amount-eur (+ subtotal tax-amount))
+          (exchange-rate (ip-invoice--get-exchange-rate))  ; Fetch rate
+          (total-amount-rsd (* total-amount-eur exchange-rate))
+          (invoice-data
+           (list :client (plist-put client :NAME client-name)
+                 :start start
+                 :end end
+                 :state (or state 'draft)
+                 :invoice-id invoice-id
+                 :type 'task
+                 :currency currency
+                 :tasks (sort task-entries
+                              (lambda (a b) (string< (plist-get a :date) (plist-get b :date))))
+                 :subtotal (format "%.2f" subtotal)
+                 :tax-rate tax-rate
+                 :tax-amount (format "%.2f" tax-amount)
+                 :total (format "%.2f" total-amount-eur)
+                 :exchange_rate (format "%.2f" exchange-rate)
+                 :total_rsd (format "%.2f" total-amount-rsd)
+                 :payment_slip t  ; Always generate payment slip
+                 :agreement (or (plist-get client :AGREEMENT) ip-invoice-agreement)
+                 :company (ip-get-company-info))))
+     ;; Normalize and return
+     (ip-invoice--normalize-data invoice-data))))
      (t
       (ip-debug-log 'error 'invoice "Unknown invoice type: %s" invoice-type)
       (error "Unknown invoice type: %s" invoice-type)))))
@@ -968,7 +1000,7 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                                                   :tax-amount (plist-get tax-data :tax-amount)))
                              total-data))
                (mustash-data (ip--plist-to-hashtable data)))
-          (ip-debug-log 'debug 'invoice "Invoice data structure: %S" data)
+          (ip-debug-log 'debug 'invoice "Invoice data structure: %S" mustash-data)
           ;; Write to file
           (with-temp-file output-file
             (set-buffer-file-coding-system 'utf-8)
