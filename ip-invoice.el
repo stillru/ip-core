@@ -229,7 +229,7 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
         (list :client (plist-put client :NAME client-name)
               :start start
               :end end
-              :state (or state 'draft)
+              :state (if (eq state 'final) "final" "draft")
               :invoice-id invoice-id
               :generated generated
               :due_date due-date
