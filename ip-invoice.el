@@ -74,7 +74,7 @@
         (end-ts (date-to-time end)))
     (org-map-entries
      (lambda ()
-       (when (string= (org-entry-get nil "CLIENT") client-id)
+       (when (member client-id (org-get-tags))
          (let ((desc (org-get-heading t t))
                (rate (string-to-number
                       (or (plist-get (ip-get-client-by-id client-id) :DEFAULT_RATE) "0"))))
@@ -209,17 +209,16 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
 (defun ip-invoice--generate-html (invoice output-file)
   "Generate HTML invoice from INVOICE data to OUTPUT-FILE."
   (ip-debug-log 'info 'invoice "Generating HTML invoice: %s" output-file)
-  (let* ((template (if (and ip-invoice-template-file
-                           (file-exists-p ip-invoice-template-file))
-                      (progn
-                        (ip-debug-log 'info 'invoice "Using custom template: %s" ip-invoice-template-file)
-                        (with-temp-buffer
-                          (set-buffer-file-coding-system 'utf-8)
-                          (insert-file-contents ip-invoice-template-file)
-                          (buffer-string)))
-                    (progn
-                      (ip-debug-log 'warning 'invoice "Template file not found, using fallback")
-                      "<h1>Template not found</h1>")))
+  (let* ((template-file (expand-file-name ip-invoice-template-file))
+         (template (if (and (file-exists-p template-file)
+                            (file-readable-p template-file))
+                       (with-temp-buffer
+                         (set-buffer-file-coding-system 'utf-8)
+                         (insert-file-contents template-file)
+                         (buffer-string))
+                     (progn
+                       (ip-debug-log 'error 'invoice "Template not found or unreadable: %s" template-file)
+                       "<h1>Invoice Template Not Found</h1>")))
          (data (ip-invoice--convert-plist-to-mustache-data invoice)))
     (condition-case err
         (with-temp-file output-file
