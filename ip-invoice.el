@@ -272,21 +272,17 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
        (error "Failed to generate HTML: %s" (error-message-string err))))))
 
 (defun ip-invoice--convert-plist-to-mustache-data (plist)
-  "Recursively convert a PLIST to a Mustache-compatible alist.
-Converts all keyword keys to lowercase strings."
+  "Recursively convert a PLIST to a Mustache-compatible alist."
   (let (result)
     (while plist
       (let ((key (car plist))
             (value (cadr plist)))
         (push (cons (downcase (substring (symbol-name key) 1))
                     (cond
-                     ;; Если это вложенный plist (список с keyword в начале)
                      ((and (listp value) (keywordp (car-safe value)))
                       (ip-invoice--convert-plist-to-mustache-data value))
-                     ;; Если это список списков (например, :tasks-plain)
                      ((and (listp value) (listp (car-safe value)))
                       (mapcar #'ip-invoice--convert-plist-to-mustache-data value))
-                     ;; Все остальное (строки, числа, символы)
                      (t value)))
               result)
         (setq plist (cddr plist))))

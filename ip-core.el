@@ -48,6 +48,20 @@
   "Modification time when clients cache was last updated.")
 
 ;; Utility functions
+(defun ip--plist-remove-duplicates (plist)
+  "Remove duplicate keys from PLIST, keeping the last occurrence."
+  (let ((keys-seen (make-hash-table :test 'equal))
+        (result '()))
+    (while plist
+      (let ((key (car plist))
+            (value (cadr plist)))
+        (unless (gethash key keys-seen)
+          (puthash key t keys-seen)
+          (push value result)
+          (push key result))
+        (setq plist (cddr plist))))
+    (nreverse result)))
+
 (defun ip--get-full-path (filename)
   "Get full path for FILENAME in `ip-org-directory'."
   (expand-file-name filename ip-org-directory))
@@ -140,9 +154,10 @@
                                                                (ip--normalize-tag client-name)))
                                                 (services (ip--parse-services hl)))
                                            (ip-debug-log 'info 'core "Loaded client: %s (ID: %s)" client-name client-id)
+                                           (ip--plist-remove-duplicates
                                            (append (list :NAME client-name :ID client-id)
                                                    props
-                                                   (when services (list :services services))))))
+                                                   (when services (list :services services)))))))
                   (ip-debug-log 'success 'core "Loaded %d clients" (length ip--clients-cache)))
               (progn
                 (ip-debug-log 'warning 'core "Clients file not found: %s" clients-path)
@@ -167,8 +182,9 @@
                   (if hl
                       (let ((props (ip--parse-properties hl)))
                         (setq ip--company-cache
+                              (ip--plist-remove-duplicates
                               (append (list :NAME (org-element-property :raw-value hl))
-                                      props))
+                                      props)))
                         (ip-debug-log 'success 'core "Loaded company data: %s" 
                                       (plist-get ip--company-cache :NAME)))
                     (progn
