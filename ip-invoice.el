@@ -68,50 +68,63 @@
 ;;; Core Functions
 
 (defun ip-invoice--get-clock-entries (start end client-id)
-  "Get clock entries for CLIENT-ID between START and END."
+  "Get clock entries for CLIENT-ID between START and END.
+Supports both :CLIENT: property and :client-id: tag."
   (let ((entries '())
         (start-ts (date-to-time start))
         (end-ts (date-to-time end)))
-    (ip-debug-log 'info 'invoice "🔍 Searching for entries with tag: %s in %s to %s" client-id start end)
-    (ip-debug-log 'info 'invoice "📁 Agenda files: %S" org-agenda-files)
+    (ip-debug-log 'info 'invoice "🔍 [CLOCK-SCAN] Начало поиска для клиента: %s" client-id)
     (org-map-entries
      (lambda ()
-       (let ((heading (org-get-heading t t))
-             (tags (org-get-tags t)))  ; ← t: включить теги из родителей
-         (ip-debug-log 'info 'invoice "📌 Checking heading: %s | Tags: %S" heading tags)
-         (if (member client-id tags)
-             (progn
-               (ip-debug-log 'info 'invoice "✅ Matched client %s in: %s" client-id heading)
-               (let ((rate (string-to-number
-                            (or (plist-get (ip-get-client-by-id client-id) :DEFAULT_RATE) "0"))))
-                 ;; Получаем элемент целиком
-                 (let ((element (org-element-at-point)))
-                   (org-element-map (org-element-contents element) 'clock
-                     (lambda (cl)
-                       (when-let ((ts (org-element-property :value cl))
-                                  (duration-str (org-element-property :duration cl)))
-                         (let* ((raw-ts (org-element-property :raw-value ts))
-                                (clock-start (org-time-string-to-time raw-ts)))
-                           (ip-debug-log 'info 'invoice "⏱️  Found clock: %s | Duration: %s" raw-ts duration-str)
-                           (when (and (time-less-p start-ts clock-start)
-                                      (time-less-p clock-start end-ts))
-                             (let* ((parts (split-string duration-str ":"))
-                                    (hours (string-to-number (car parts)))
-                                    (minutes (if (> (length parts) 1) (string-to-number (cadr parts)) 0))
-                                    (hours-float (+ hours (/ minutes 60.0)))
-                                    (amount (* hours-float rate))
-                                    (date (format-time-string "%Y-%m-%d" clock-start)))
-                               (ip-debug-log 'info 'invoice "✅ Adding entry: %s | %.2f hours | %.2f EUR" date hours-float amount)
-                               (push (list :date date
-                                           :description (encode-coding-string heading 'utf-8)
-                                           :hours (format "%.2f" hours-float)
-                                           :rate (format "%.2f" rate)
-                                           :amount (format "%.2f" amount))
-                                     entries))))))))))
-           (ip-debug-log 'info 'invoice "❌ No match for %s in: %s" client-id heading))))
-     client-id  ; ← селектор: ищем по тегу
+       (let* ((heading (org-get-heading t t))
+              (client-prop (org-entry-get nil "CLIENT"))
+              (tags (org-get-tags t))
+              (has-client-prop (string= client-prop client-id))
+              (has-client-tag (member client-id tags)))
+         (ip-debug-log 'info 'invoice "📌 [CLOCK-SCAN] Заголовок: %s" heading)
+         (ip-debug-log 'info 'invoice "🏷️  [CLOCK-SCAN] CLIENT свойство: %S" client-prop)
+         (ip-debug-log 'info 'invoice "🔖 [CLOCK-SCAN] Теги: %S" tags)
+         (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Совпадение по свойству: %s" (if has-client-prop "да" "нет"))
+         (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Совпадение по тегу: %s" (if has-client-tag "да" "нет"))
+
+         (when (or has-client-prop has-client-tag)
+           (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Клиент %s найден" client-id)
+           (let ((rate (string-to-number
+                        (or (plist-get (ip-get-client-by-id client-id) :DEFAULT_RATE) "0"))))
+             (ip-debug-log 'info 'invoice "💶 [CLOCK-SCAN] Ставка: %.2f EUR/час" rate)
+             (let ((element (org-element-at-point)))
+               (org-element-map (org-element-contents element) 'clock
+                 (lambda (cl)
+                   (when-let ((ts (org-element-property :value cl))
+                              (duration-str (org-element-property :duration cl)))
+                     (let* ((raw-ts (org-element-property :raw-value ts))
+                            (clock-start (org-time-string-to-time raw-ts)))
+                       (ip-debug-log 'info 'invoice "⏱️  [CLOCK-SCAN] Найдена CLOCK: %s | Длительность: %s" raw-ts duration-str)
+                       (when (and (time-less-p start-ts clock-start)
+                                  (time-less-p clock-start end-ts))
+                         (ip-debug-log 'info 'invoice "📅 [CLOCK-SCAN] CLOCK в диапазоне: %s" raw-ts)
+                         (let* ((parts (split-string duration-str ":"))
+                                (hours (string-to-number (car parts)))
+                                (minutes (if (> (length parts) 1) (string-to-number (cadr parts)) 0))
+                                (hours-float (+ hours (/ minutes 60.0)))
+                                (amount (* hours-float rate))
+                                (date (format-time-string "%Y-%m-%d" clock-start)))
+                           (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Добавляем: %s | %.2f ч | %.2f EUR" date hours-float amount)
+                           (push (list :date date
+                                       :description (encode-coding-string heading 'utf-8)
+                                       :hours (format "%.2f" hours-float)
+                                       :rate (format "%.2f" rate)
+                                       :amount (format "%.2f" amount))
+                                 entries))))))))))))
+     t  ; ← ищем все заголовки
      'file)
-    (ip-debug-log 'info 'invoice "✅ Found %d entries" (length entries))
+    (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Найдено записей: %d" (length entries))
+    (dolist (entry entries)
+      (ip-debug-log 'info 'invoice "📋 [CLOCK-SCAN] Итог: %s | %s | %s ч | %s EUR"
+                    (plist-get entry :date)
+                    (plist-get entry :description)
+                    (plist-get entry :hours)
+                    (plist-get entry :amount)))
     (sort entries (lambda (a b) (string< (plist-get a :date) (plist-get b :date))))))
 
 (defun ip-invoice--generate-qr-code (invoice)
