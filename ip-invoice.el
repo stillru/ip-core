@@ -7,6 +7,8 @@
 ;; Enhanced with Serbian invoice format support.
 ;;; Code:
 
+(declare-function ip-debug-log "ip-debug" (level module message &rest args))
+
 (eval-and-compile
   ;; Fallback logging if ip-debug is not available
   (unless (fboundp 'ip-debug-log)
@@ -74,63 +76,66 @@
 
 (defun ip-invoice--get-clock-entries (start end client-id)
   "Get clock entries for CLIENT-ID between START and END.
-Supports both :CLIENT: property and :client-id: tag."
+Uses direct AST parsing to avoid org-element-at-point issues."
   (let ((entries '())
         (start-ts (date-to-time start))
         (end-ts (date-to-time end)))
     (ip-debug-log 'info 'invoice "🔍 [CLOCK-SCAN] Начало поиска для клиента: %s" client-id)
-    (org-map-entries
-     (lambda ()
-       (let* ((heading (org-get-heading t t))
-              (client-prop (org-entry-get nil "CLIENT"))
-              (tags (org-get-tags t))
-              (has-client-prop (string= client-prop client-id))
-              (has-client-tag (member client-id tags)))
-         (ip-debug-log 'info 'invoice "📌 [CLOCK-SCAN] Заголовок: %s" heading)
-         (ip-debug-log 'info 'invoice "🏷️  [CLOCK-SCAN] CLIENT свойство: %S" client-prop)
-         (ip-debug-log 'info 'invoice "🔖 [CLOCK-SCAN] Теги: %S" tags)
-         (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Совпадение по свойству: %s" (if has-client-prop "да" "нет"))
-         (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Совпадение по тегу: %s" (if has-client-tag "да" "нет"))
+    (ip-debug-log 'info 'invoice "📁 [CLOCK-SCAN] Поиск в файле: %s" (expand-file-name ip-tasks-file ip-org-directory))
 
-         (when (ip-invoice--client-matches client-id)
-           (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Клиент %s найден" client-id)
-           (let ((rate (string-to-number
-                        (or (plist-get (ip-get-client-by-id client-id) :DEFAULT_RATE) "0"))))
-             (ip-debug-log 'info 'invoice "💶 [CLOCK-SCAN] Ставка: %.2f EUR/час" rate)
-             (let ((element (org-element-at-point)))
-               (org-element-map (org-element-contents element) 'clock
-                 (lambda (cl)
-                   (when-let ((ts (org-element-property :value cl))
-                              (duration-str (org-element-property :duration cl)))
-                     (let* ((raw-ts (org-element-property :raw-value ts))
-                            (clock-start (org-time-string-to-time raw-ts)))
-                       (ip-debug-log 'info 'invoice "⏱️  [CLOCK-SCAN] Найдена CLOCK: %s | Длительность: %s" raw-ts duration-str)
-                       (when (and (time-less-p start-ts clock-start)
-                                  (time-less-p clock-start end-ts))
-                         (ip-debug-log 'info 'invoice "📅 [CLOCK-SCAN] CLOCK в диапазоне: %s" raw-ts)
-                         (let* ((parts (split-string duration-str ":"))
-                                (hours (string-to-number (car parts)))
-                                (minutes (if (> (length parts) 1) (string-to-number (cadr parts)) 0))
-                                (hours-float (+ hours (/ minutes 60.0)))
-                                (amount (* hours-float rate))
-                                (date (format-time-string "%Y-%m-%d" clock-start)))
-                           (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Добавляем: %s | %.2f ч | %.2f EUR" date hours-float amount)
-                           (push (list :date date
-                                       :description (encode-coding-string heading 'utf-8)
-                                       :hours (format "%.2f" hours-float)
-                                       :rate (format "%.2f" rate)
-                                       :amount (format "%.2f" amount))
-                                 entries))))))))))))
-     t  ; ← ищем все заголовки
-     'file)
-    (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Найдено записей: %d" (length entries))
+    ;; Явно открываем файл и парсим AST
+    (with-current-buffer (find-file-noselect (expand-file-name ip-tasks-file ip-org-directory))
+      (org-element-map (org-element-parse-buffer) 'headline
+        (lambda (headline)
+          (let* ((heading (org-element-property :raw-value headline))
+                 (client-prop (org-element-property :CLIENT headline))
+                 (tags (org-element-property :tags headline))
+                 (has-client-prop (string= client-prop client-id))
+                 (has-client-tag (member client-id tags)))
+            (ip-debug-log 'info 'invoice "📌 [CLOCK-SCAN] Заголовок: %s" heading)
+            (ip-debug-log 'info 'invoice "🏷️  [CLOCK-SCAN] CLIENT свойство: %S" client-prop)
+            (ip-debug-log 'info 'invoice "🔖 [CLOCK-SCAN] Теги: %S" tags)
+            (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Совпадение по свойству: %s" (if has-client-prop "да" "нет"))
+            (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Совпадение по тегу: %s" (if has-client-tag "да" "нет"))
+
+            (when (or has-client-prop has-client-tag)
+              (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Клиент %s найден" client-id)
+              (let ((rate (string-to-number
+                           (or (plist-get (ip-get-client-by-id client-id) :DEFAULT_RATE) "0"))))
+                (ip-debug-log 'info 'invoice "💶 [CLOCK-SCAN] Ставка: %.2f EUR/час" rate)
+                ;; Ищем CLOCK записи в этом заголовке
+                (org-element-map (org-element-contents headline) 'clock
+                  (lambda (cl)
+                    (when-let ((ts (org-element-property :value cl))
+                               (duration-str (org-element-property :duration cl)))
+                      (let* ((raw-ts (org-element-property :raw-value ts))
+                             (clock-start (org-time-string-to-time raw-ts)))
+                        (ip-debug-log 'info 'invoice "⏱️  [CLOCK-SCAN] Найдена CLOCK: %s | Длительность: %s" raw-ts duration-str)
+                        (when (and (time-less-p start-ts clock-start)
+                                   (time-less-p clock-start end-ts))
+                          (ip-debug-log 'info 'invoice "📅 [CLOCK-SCAN] CLOCK в диапазоне: %s" raw-ts)
+                          (let* ((parts (split-string duration-str ":"))
+                                 (hours (string-to-number (car parts)))
+                                 (minutes (if (> (length parts) 1) (string-to-number (cadr parts)) 0))
+                                 (hours-float (+ hours (/ minutes 60.0)))
+                                 (amount (* hours-float rate))
+                                 (date (format-time-string "%Y-%m-%d" clock-start)))
+                            (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Добавляем: %s | %.2f ч | %.2f EUR" date hours-float amount)
+                            (push (list :date date
+                                        :description (encode-coding-string heading 'utf-8)
+                                        :hours (format "%.2f" hours-float)
+                                        :rate (format "%.2f" rate)
+                                        :amount (format "%.2f" amount))
+                                  entries))))))))))))
+      'file)
     (dolist (entry entries)
       (ip-debug-log 'info 'invoice "📋 [CLOCK-SCAN] Итог: %s | %s | %s ч | %s EUR"
                     (plist-get entry :date)
                     (plist-get entry :description)
                     (plist-get entry :hours)
                     (plist-get entry :amount)))
-    (sort entries (lambda (a b) (string< (plist-get a :date) (plist-get b :date))))))
+    (sort entries (lambda (a b) (string< (plist-get a :date) (plist-get b :date))))
+    (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Найдено записей: %d" (length entries))))
 
 (defun ip-invoice--generate-qr-code (invoice)
   "Generate NBS IPS QR code (mocked for now)."
@@ -161,9 +166,7 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
   (ip-debug-log 'info 'invoice "Generating invoice data for %s (%s to %s)" client-id start end)
   (let* ((client-id (string-trim client-id))
          (client (or (ip-get-client-by-id client-id)
-                     (progn
-                       (ip-debug-log 'error 'invoice "Unknown client ID: %s" client-id)
-                       (error "Unknown client ID: %s" client-id))))
+                     (error "Unknown client ID: %s" client-id)))
          (client-name (or (plist-get client :NAME) client-id))
          (currency (or (plist-get client :CURRENCY) "EUR"))
          (tax-rate (or (string-to-number (or (plist-get client :TAX_RATE) "0")) 0.0))
@@ -173,20 +176,20 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
          (generated (format-time-string "%Y-%m-%d"))
          (due-date (format-time-string "%Y-%m-%d" (time-add (date-to-time end) (days-to-time 13))))
          (company (ip-get-company-info))
-         (exchange-rate 117.85) ; stub
+         (exchange-rate 117.85)
          (tasks-plain ())
          (tasks-aggregated (make-hash-table :test 'equal))
          (subtotal 0.0))
-    ;; Load and process entries
+    ;; ✅ Используем НАШУ функцию
     (let ((entries (ip-invoice--get-clock-entries start end client-id)))
       (dolist (entry entries)
         (let* ((desc (plist-get entry :description))
                (hours (string-to-number (plist-get entry :hours)))
                (rate (string-to-number (plist-get entry :rate)))
                (amount (* hours rate)))
-          ;; Add to plain
+          ;; Добавляем в plain
           (push entry tasks-plain)
-          ;; Aggregate
+          ;; Агрегируем
           (let ((agg (gethash desc tasks-aggregated)))
             (if agg
                 (puthash desc
@@ -200,7 +203,7 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
                              :amount amount)
                        tasks-aggregated)))
           (setq subtotal (+ subtotal amount)))))
-    ;; Convert hash-table to list
+    ;; Преобразуем hash-table в список
     (let ((aggregated-list (let (result)
                              (maphash (lambda (desc data)
                                         (push (list :description desc
@@ -209,10 +212,10 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
                                               result))
                                       tasks-aggregated)
                              (nreverse result))))
-      ;; Sort
+      ;; Сортируем
       (setq tasks-plain (sort tasks-plain (lambda (a b) (string< (plist-get a :date) (plist-get b :date)))))
       (setq aggregated-list (sort aggregated-list (lambda (a b) (string< (plist-get a :description) (plist-get b :description)))))
-      ;; Final calculation
+      ;; Финальный расчёт
       (let* ((tax-amount (* subtotal (/ tax-rate 100.0)))
              (total-amount-eur (+ subtotal tax-amount))
              (total-amount-rsd (* total-amount-eur exchange-rate))
