@@ -68,8 +68,7 @@
 ;;; Core Functions
 
 (defun ip-invoice--get-clock-entries (start end client-id)
-  "Get clock entries for CLIENT-ID between START and END.
-Each entry corresponds to a single CLOCK line with its actual duration."
+  "Get clock entries for CLIENT-ID between START and END."
   (let ((entries '())
         (start-ts (date-to-time start))
         (end-ts (date-to-time end)))
@@ -85,10 +84,8 @@ Each entry corresponds to a single CLOCK line with its actual duration."
                           (duration-str (org-element-property :duration cl)))
                  (let* ((raw-ts (org-element-property :raw-value ts))
                         (clock-start (org-time-string-to-time raw-ts)))
-                   ;; Check if clock entry is within range
                    (when (and (time-less-p start-ts clock-start)
                               (time-less-p clock-start end-ts))
-                     ;; Parse duration: "2:30" → 2.5
                      (let* ((parts (split-string duration-str ":"))
                             (hours (string-to-number (car parts)))
                             (minutes (if (> (length parts) 1) (string-to-number (cadr parts)) 0))
@@ -102,7 +99,6 @@ Each entry corresponds to a single CLOCK line with its actual duration."
                                    :amount (format "%.2f" amount))
                              entries))))))))))
      t 'file)
-    ;; Sort by date
     (sort entries (lambda (a b) (string< (plist-get a :date) (plist-get b :date))))))
 
 (defun ip-invoice--generate-qr-code (invoice)
