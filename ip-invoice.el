@@ -658,6 +658,22 @@ Possible values: \='default, \='enhanced, or \='file."
                  collect (ip-invoice--parse-task hl))
       (ip-debug-log 'success 'invoice "Loaded %d tasks" count))))
 
+(defun ip--plist-to-hashtable (plist)
+  (let ((table (make-hash-table :test 'equal)))
+    (while plist
+      (let ((key (downcase (substring (symbol-name (car plist)) 1)))
+            (value (cadr plist)))
+        (puthash key
+                 (cond
+                  ((and (listp value) (not (null value)) (keywordp (car value)))
+                   (ip--plist-to-hashtable value)) ; Convert nested plist
+                  ((and (listp value) (not (null value)) (listp (car value)))
+                   (mapcar #'ip--plist-to-hashtable value)) ; Convert list of plists
+                  (t (format "%s" value)))
+                 table))
+      (setq plist (cddr plist)))
+    table))
+
 (defun ip-invoice--generate-invoice-id ()
   "Generate a unique invoice ID."
   (unless (file-directory-p ip-invoice-final-dir)
@@ -950,12 +966,13 @@ STATE is \\='draft or \\='final. INVOICE-TYPE is \\='service or \\='task."
                              (when tasks-data (list :tasks tasks-data))
                              (when tax-data (list :tax-rate (plist-get tax-data :tax-rate)
                                                   :tax-amount (plist-get tax-data :tax-amount)))
-                             total-data)))
+                             total-data))
+               (mustash-data (ip--plist-to-hashtable data)))
           (ip-debug-log 'debug 'invoice "Invoice data structure: %S" data)
           ;; Write to file
           (with-temp-file output-file
             (set-buffer-file-coding-system 'utf-8)
-            (insert (mustache-render template data)))
+            (insert (mustache-render template mustash-data)))
           (ip-debug-log 'info 'invoice "Successfully generated HTML invoice: %s" output-file)))
     (error
      (ip-debug-log 'error 'invoice "Failed to generate HTML: %s" (error-message-string err))
