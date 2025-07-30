@@ -263,6 +263,7 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
     (condition-case err
         (with-temp-file output-file
           (set-buffer-file-coding-system 'utf-8)
+          (ip-debug-log 'debug 'invoice "📄 [HTML] Конечные данные: %S" data)
           (insert (mustache-render template data))
           (write-region (point-min) (point-max) output-file nil 'silent)
           (ip-debug-log 'success 'invoice "HTML invoice generated: %s" output-file))
