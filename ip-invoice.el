@@ -67,6 +67,11 @@
 
 ;;; Core Functions
 
+(defun ip-invoice--client-matches (client-id)
+  "Return t if current entry matches CLIENT-ID via property or tag."
+  (or (string= (org-entry-get nil "CLIENT") client-id)
+      (member client-id (org-get-tags t))))
+
 (defun ip-invoice--get-clock-entries (start end client-id)
   "Get clock entries for CLIENT-ID between START and END.
 Supports both :CLIENT: property and :client-id: tag."
@@ -87,7 +92,7 @@ Supports both :CLIENT: property and :client-id: tag."
          (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Совпадение по свойству: %s" (if has-client-prop "да" "нет"))
          (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Совпадение по тегу: %s" (if has-client-tag "да" "нет"))
 
-         (when (or has-client-prop has-client-tag)
+         (when (ip-invoice--client-matches client-id)
            (ip-debug-log 'info 'invoice "✅ [CLOCK-SCAN] Клиент %s найден" client-id)
            (let ((rate (string-to-number
                         (or (plist-get (ip-get-client-by-id client-id) :DEFAULT_RATE) "0"))))
