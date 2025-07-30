@@ -128,10 +128,10 @@ Each entry corresponds to a single CLOCK line with its actual duration."
   "Generate a unique invoice ID."
   (format-time-string "INV-%Y%m%d-%H%M%S"))
 
-(defun ip-invoice-generate-data (client-id start end &optional state invoice-type)
+(defun ip-invoice-generate-data (client-id start end &optional state)
   "Generate invoice data for CLIENT-ID from START to END.
 Returns a plist with :tasks-plain and :tasks-aggregated."
-  (ip-debug-log 'info 'invoice "Generating invoice for %s (%s to %s)" client-id start end)
+  (ip-debug-log 'info 'invoice "Generating invoice data for %s (%s to %s)" client-id start end)
   (let* ((client-id (string-trim client-id))
          (client (or (ip-get-client-by-id client-id)
                      (progn
@@ -262,13 +262,20 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
         (format-time-string "%Y-%m-%d" (time-subtract next-month (seconds-to-time 86400)))
       (format "%04d-%02d-%02d" year month (cadr (calendar-last-day-of-month month year))))))
 
-(defun ip-invoice-generate (client-id start end &optional state invoice-type)
+(defun ip-invoice-generate (client-id start end &optional state)
   "Generate an invoice and save to file."
-  (let* ((invoice (ip-invoice-generate-data client-id start end state invoice-type))
+  (let* ((invoice (ip-invoice-generate-data client-id start end state))
          (output-dir (if (eq state 'final) ip-invoice-final-dir ip-invoice-draft-dir))
          (output-file (expand-file-name (format "%s-%s.html" client-id (plist-get invoice :invoice-id)) output-dir)))
     (unless (file-directory-p output-dir)
       (make-directory output-dir t))
+    (ip-debug-log 'debug 'invoice "tasks-plain type: %S, value: %S"
+              (type-of (plist-get invoice :tasks-plain))
+              (plist-get invoice :tasks-plain))
+    (ip-debug-log 'debug 'invoice "tasks-aggregated type: %S, value: %S"
+              (type-of (plist-get invoice :tasks-aggregated))
+              (plist-get invoice :tasks-aggregated))
+    (ip-debug-log 'debug 'invoice "invoice: %S" invoice)
     (ip-invoice--generate-html invoice output-file)
     output-file))
 
@@ -295,16 +302,16 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
   (let* ((client-id (completing-read "Client ID: " (ip-list-client-ids)))
          (start (read-string "Start date (YYYY-MM-DD): "))
          (end (read-string "End date (YYYY-MM-DD): "))
-         (type-str (completing-read "Invoice type: " '("task" "service") nil t))
-         (invoice-type (intern type-str))
+;;         (type-str (completing-read "Invoice type: " '("task" "service") nil t))
+;;         (invoice-type (intern type-str))
          (final-p (y-or-n-p "Generate final invoice? "))
          (state (if final-p 'final 'draft)))
     (unless (and (string-match-p "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}$" start)
                   (string-match-p "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}$" end))
       (user-error "Invalid date format. Use YYYY-MM-DD"))
-    (let ((output-file (ip-invoice-generate client-id start end state invoice-type)))
+    (let ((output-file (ip-invoice-generate client-id start end state)))
       (message "Invoice generated: %s" output-file)
-      (browse-url (concat "file://" output-file))))))
+      (browse-url (concat "file://" output-file)))))
 
 (provide 'ip-invoice)
 ;;; ip-invoice.el ends here
