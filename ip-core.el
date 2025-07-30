@@ -49,18 +49,21 @@
 
 ;; Utility functions
 (defun ip--plist-remove-duplicates (plist)
-  "Remove duplicate keys from PLIST, keeping the last occurrence."
-  (let ((keys-seen (make-hash-table :test 'equal))
-        (result '()))
+  "Remove duplicate keys from PLIST, keeping the LAST occurrence."
+  (let ((hash (make-hash-table :test 'equal)))
+    ;; Проходим по всем парам и записываем в хеш — последнее значение перезапишет предыдущие
     (while plist
       (let ((key (car plist))
             (value (cadr plist)))
-        (unless (gethash key keys-seen)
-          (puthash key t keys-seen)
-          (push value result)
-          (push key result))
-        (setq plist (cddr plist))))
-    (nreverse result)))
+        (puthash key value hash))
+      (setq plist (cddr plist)))
+    ;; Преобразуем хеш обратно в plist
+    (let (result)
+      (maphash (lambda (key value)
+                 (push value result)
+                 (push key result))
+               hash)
+      (nreverse result))))
 
 (defun ip--get-full-path (filename)
   "Get full path for FILENAME in `ip-org-directory'."
