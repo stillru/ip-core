@@ -180,38 +180,37 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
          (tasks-plain ())
          (tasks-aggregated (make-hash-table :test 'equal))
          (subtotal 0.0))
-    ;; ✅ Используем НАШУ функцию
-    (let ((entries (ip-invoice--get-clock-entries start end client-id)))
-      (dolist (entry entries)
-        (let* ((desc (plist-get entry :description))
-               (hours (string-to-number (plist-get entry :hours)))
-               (rate (string-to-number (plist-get entry :rate)))
-               (amount (* hours rate)))
-          ;; Добавляем в plain
-          (push entry tasks-plain)
-          ;; Агрегируем
-          (let ((agg (gethash desc tasks-aggregated)))
-            (if agg
-                (puthash desc
-                         (list :description desc
-                               :total_hours (+ (plist-get agg :total_hours) hours)
-                               :amount (+ (plist-get agg :amount) amount))
-                         tasks-aggregated)
+(let ((entries (ip-invoice--get-clock-entries start end client-id)))
+  (ip-debug-log 'info 'invoice "📥 [DATA] Получено %d записей из ip-invoice--get-clock-entries" (length entries))
+  (dolist (entry entries)
+    (ip-debug-log 'info 'invoice "🔍 [DATA] Обработка записи: %S" entry)
+    (let* ((desc (plist-get entry :description))
+           (hours (string-to-number (plist-get entry :hours)))
+           (rate (string-to-number (plist-get entry :rate)))
+           (amount (* hours rate)))
+      (ip-debug-log 'info 'invoice "📊 [DATA] Описание: %s | Часы: %.2f | Ставка: %.2f | Сумма: %.2f" desc hours rate amount)
+      (push entry tasks-plain)
+      (ip-debug-log 'info 'invoice "✅ [DATA] Добавлено в tasks-plain")
+      (let ((agg (gethash desc tasks-aggregated)))
+        (if agg
+            (progn
+              (ip-debug-log 'info 'invoice "📊 [DATA] Обновление агрегированной записи для: %s" desc)
               (puthash desc
                        (list :description desc
-                             :total_hours hours
-                             :amount amount)
-                       tasks-aggregated)))
-          (setq subtotal (+ subtotal amount)))))
+                             :total_hours (+ (plist-get agg :total_hours) hours)
+                             :amount (+ (plist-get agg :amount) amount))
+                       tasks-aggregated))
+          (progn
+            (ip-debug-log 'info 'invoice "🆕 [DATA] Создание новой агрегированной записи для: %s" desc)
+            (puthash desc
+                     (list :description desc
+                           :total_hours hours
+                           :amount amount)
+                     tasks-aggregated))))
+      (setq subtotal (+ subtotal amount))
+      (ip-debug-log 'info 'invoice "🧮 [DATA] Подытог: %.2f EUR" subtotal))))
     ;; Преобразуем hash-table в список
-    (let ((aggregated-list (let (result)
-                             (maphash (lambda (desc data)
-                                        (push (list :description desc
-                                                    :total_hours (format "%.2f" (plist-get data :total_hours))
-                                                    :amount (format "%.2f" (plist-get data :amount)))
-                                              result))
-                                      tasks-aggregated)
-                             (nreverse result))))
+    (let 
       ;; Сортируем
       (setq tasks-plain (sort tasks-plain (lambda (a b) (string< (plist-get a :date) (plist-get b :date)))))
       (setq aggregated-list (sort aggregated-list (lambda (a b) (string< (plist-get a :description) (plist-get b :description)))))
@@ -274,12 +273,16 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
                     (cond
                      ;; 1. Если это plist (список с keyword в начале)
                      ((and (listp value) (keywordp (car-safe value)))
+                      (ip-debug-log 'debug 'invoice "Converting plist value: %S" value)
                       (ip-invoice--convert-plist-to-mustache-data value))
                      ;; 2. Если это список списков (например, :tasks-plain)
                      ((and (listp value) (listp (car-safe value)))
+                      (ip-debug-log 'debug 'invoice "Converting list of lists: %S" value)
                       (mapcar #'ip-invoice--convert-plist-to-mustache-data value))
                      ;; 3. Все остальное (включая nil, строки, числа)
-                     (t value)))
+                     (t
+                      (ip-debug-log 'debug 'invoice "Passing raw value: %S (type: %s)" value (type-of value))
+                      value)))
               result)
         (setq plist (cddr plist))))
     (nreverse result)))
