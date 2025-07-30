@@ -60,8 +60,8 @@
     ;; Преобразуем хеш обратно в plist
     (let (result)
       (maphash (lambda (key value)
-                 (push value result)
-                 (push key result))
+                 (push key result)
+                 (push value result))
                hash)
       (nreverse result))))
 
