@@ -77,6 +77,7 @@
        (let ((heading (org-get-heading t t))
              (tags (org-get-tags)))
          (ip-debug-log 'debug 'invoice "Scanning: %s | Tags: %S" heading tags)
+         (message "[DEBUG] Checking task: %s | Tags: %s" title tags)
          (when (member client-id tags)
            (ip-debug-log 'debug 'invoice "✅ Matched client: %s" client-id)
            (let ((desc heading)
@@ -284,6 +285,7 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
 ;;;###autoload
 (defun ip-invoice-month (client-id)
   "Generate a draft invoice for CLIENT-ID for the current month."
+  (ip-debug-log 'info 'invoice "🧪 Test log: ip-invoice-month started for %s" client-id)
   (interactive (list (completing-read "Client ID: " (ip-list-client-ids))))
   (let* ((today (current-time))
          (year (string-to-number (format-time-string "%Y" today)))
