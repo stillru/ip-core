@@ -5,9 +5,32 @@
 ;; This module provides the foundation for the IP management system.
 
 ;;; Code:
+
+(declare-function ip-debug-log "ip-debug" (level module message &rest args))
+
 (require 'org-element)
 (require 'cl-lib)
 (require 'subr-x)
+
+(condition-case nil
+    (require 'ip-debug)
+  (error
+   (defun ip-debug-log (level module message &rest args)
+     "Fallback logging function."
+     (let ((formatted-msg (apply #'format message args))
+           (level-str (pcase level
+                        ('info "INFO")
+                        ('success "SUCCESS") 
+                        ('warning "WARNING")
+                        ('error "ERROR")
+                        (_ "DEBUG")))
+           (module-str (upcase (symbol-name module))))
+       (message "[%s/%s] %s" module-str level-str formatted-msg)))
+   
+   (defmacro ip-debug (module message &rest args)
+     "Fallback debug macro."
+     `(ip-debug-log 'info ,module ,message ,@args))))
+
 
 (defgroup ip-core nil
   "Personal business management via Org-mode."
