@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2025 IP Management System
 ;; Author: IP Management System
-;; Version: 2.0
+;; Version: 2.1
 ;; Keywords: org, invoice, time-tracking, billing
 ;; Package-Requires: ((emacs "27.1") (org "9.0") (mustache "0.24") (request "0.3") (deferred "0.5"))
 
@@ -12,12 +12,17 @@
 ;; 
 ;; Features:
 ;; - Task-based invoices using org-mode clock entries
-;; - Integration with ip-core.el for client data
+;; - Integration with ip-core.el for client data and ip-debug.el for logging
 ;; - HTML invoice generation using mustache templates
 ;; - Serbian invoice format with NBS QR code support
-;; - Draft and final invoice states
+;; - Draft and final invoice states with unique ID generation
 ;; - Automatic task aggregation and time calculations
-;; - Multi-currency support with automatic conversion
+;; - Multi-currency support with configurable exchange rates
+;; - MOD-97 reference number generation for Serbian banking
+;;
+;; Usage:
+;;   M-x ip-invoice-month             ; Generate draft for current month
+;;   M-x ip-invoice-generate-interactive ; Interactive invoice generation
 
 ;;; Code:
 
@@ -31,16 +36,22 @@
 (require 'json)
 (require 'request)
 (require 'deferred)
+(require 'request-deferred)
 
-;; External dependencies with fallbacks
+;; External dependencies
 (declare-function ip-debug-log "ip-debug" (level module message &rest args))
+(declare-function ip-get-client-by-id "ip-core" (client-id))
+(declare-function ip-get-company-info "ip-core" ())
+(declare-function ip-list-client-ids "ip-core" ())
+
 (require 'ip-core)
 
+;; Fallback logging if ip-debug is not available
 (condition-case nil
     (require 'ip-debug)
   (error
    (defun ip-debug-log (level module message &rest args)
-     "Fallback logging function."
+     "Fallback logging function that uses `message'."
      (let ((formatted-msg (apply #'format message args))
            (level-str (pcase level
                         ('info "INFO")
@@ -52,7 +63,7 @@
        (message "[%s/%s] %s" module-str level-str formatted-msg)))
    
    (defmacro ip-debug (module message &rest args)
-     "Fallback debug macro."
+     "Fallback debug macro that uses `ip-debug-log'."
      `(ip-debug-log 'info ,module ,message ,@args))))
 
 ;;; Customization
@@ -82,9 +93,29 @@
   :type 'boolean
   :group 'ip-invoice)
 
-(defcustom ip-invoice-nbs-qr-generate-url "https://nbs.rs/QRcode/api/qr/v1/generate?lang=sr_RS_Latn"
-  "NBS IPS endpoint for QR code generation."
+(defcustom ip-invoice-nbs-qr-base-url "https://nbs.rs/QRcode/api/qr/v1/generate"
+  "Base URL for NBS IPS QR code generation API."
   :type 'string
+  :group 'ip-invoice)
+
+(defcustom ip-invoice-qr-size nil
+  "Optional size for NBS QR code (e.g., '200x200'). Nil for default size."
+  :type '(choice string (const nil))
+  :group 'ip-invoice)
+
+(defcustom ip-invoice-qr-lang "sr_RS_Latn"
+  "Language for NBS QR code error messages (sr_RS_Latn, sr_RS, or en)."
+  :type '(choice (const "sr_RS_Latn") (const "sr_RS") (const "en"))
+  :group 'ip-invoice)
+
+(defcustom ip-invoice-qr-fallback "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+  "Fallback base64 PNG for QR code generation failures. Nil to disable."
+  :type '(choice string (const nil))
+  :group 'ip-invoice)
+
+(defcustom ip-invoice-qr-retries 3
+  "Number of retry attempts for NBS QR code API calls."
+  :type 'integer
   :group 'ip-invoice)
 
 (defcustom ip-invoice-default-exchange-rate 117.85
@@ -97,46 +128,109 @@
   :type 'integer
   :group 'ip-invoice)
 
+(defcustom ip-invoice-max-reference-length 25
+  "Maximum length for MOD-97 reference number."
+  :type 'integer
+  :group 'ip-invoice)
+
 ;;; Utility Functions
 
-(defun ip-invoice--mod97-string-to-number (str)
+(defun ip-invoice--char-to-mod97-number (char)
+  "Convert CHAR to number for MOD-97 calculation.
+Numbers remain as-is, letters: A=10, B=11, ..., Z=35."
+  (cond
+   ((and (>= char ?0) (<= char ?9)) (- char ?0))
+   ((and (>= char ?A) (<= char ?Z)) (- char ?A -10))
+   ((and (>= char ?a) (<= char ?z)) (- char ?a -10))
+   (t nil)))
+
+(defun ip-invoice--string-to-mod97-number (str)
   "Convert string STR to number for MOD-97 calculation.
-Converts A=10, B=11, ..., Z=35. Non-alphanumeric characters are ignored."
-  (let ((result ""))
-    (dolist (char (append str nil))
-      (cond
-       ((and (>= char ?0) (<= char ?9))
-        (setq result (concat result (char-to-string char))))
-       ((and (>= char ?A) (<= char ?Z))
-        (setq result (concat result (number-to-string (- char ?A -10)))))
-       ((and (>= char ?a) (<= char ?z))
-        (setq result (concat result (number-to-string (- char ?a -10)))))))
-    (if (string-empty-p result) 0 (string-to-number result))))
+Non-alphanumeric characters are ignored."
+  (let ((digits '()))
+    (dolist (char (string-to-list str))
+      (when-let ((digit (ip-invoice--char-to-mod97-number char)))
+        (if (< digit 10)
+            (push (number-to-string digit) digits)
+          (let ((digit-str (number-to-string digit)))
+            (push (substring digit-str 1) digits)
+            (push (substring digit-str 0 1) digits)))))
+    (if digits
+        (string-to-number (apply #'concat (nreverse digits)))
+      0)))
+
+(defun ip-invoice--truncate-reference-base (base-string max-length)
+  "Truncate BASE-STRING to fit in max reference length, accounting for checksum."
+  (let ((max-base-length (- max-length 3))) ; 2 digits + 1 dash
+    (if (> (length base-string) max-base-length)
+        (substring base-string 0 max-base-length)
+      base-string)))
 
 (defun ip-invoice--generate-mod97-reference (base-string)
   "Generate MOD-97 reference number for BASE-STRING.
-Returns string in format XX-BASE-STRING where XX is the checksum."
-  (let* ((clean (replace-regexp-in-string "[^[:alnum:]]" "" base-string))
-         (num (ip-invoice--mod97-string-to-number clean))
+Returns string in format XX-BASE-STRING, truncated to fit max length."
+  (let* ((truncated-base (ip-invoice--truncate-reference-base 
+                         base-string ip-invoice-max-reference-length))
+         (clean (replace-regexp-in-string "[^[:alnum:]]" "" truncated-base))
+         (num (ip-invoice--string-to-mod97-number clean))
          (checksum (- 98 (% (* num 100) 97)))
          (checksum-str (format "%02d" checksum)))
-    (format "%s-%s" checksum-str base-string)))
+    (format "%s-%s" checksum-str truncated-base)))
 
 (defun ip-invoice--last-day-of-month (year month)
   "Return the last day of MONTH in YEAR as string YYYY-MM-DD."
   (let ((last-day (calendar-last-day-of-month month year)))
-    (format "%04d-%02d-%02d" year month (if (listp last-day) (cadr last-day) last-day))))
+    (format "%04d-%02d-%02d" year month 
+            (if (listp last-day) (cadr last-day) last-day))))
 
 (defun ip-invoice--generate-invoice-id ()
   "Generate a unique invoice ID with timestamp."
   (format-time-string "INV-%Y%m%d-%H%M%S"))
 
-(defun ip-invoice--client-matches-p (client-id)
-  "Return non-nil if current org entry matches CLIENT-ID via property or tag."
-  (or (string= (org-entry-get nil "CLIENT") client-id)
-      (member client-id (org-get-tags t))))
+(defun ip-invoice--format-amount (amount)
+  "Format AMOUNT as string with 2 decimal places."
+  (format "%.2f" (if (stringp amount) (string-to-number amount) amount)))
+
+(defun ip-invoice--safe-string-to-number (str)
+  "Safely convert STR to number, returning 0.0 if invalid."
+  (if (and str (string-match-p "^[0-9]+\\.?[0-9]*$" str))
+      (string-to-number str)
+    0.0))
 
 ;;; Clock Entry Processing
+
+(defun ip-invoice--client-matches-p (headline client-id)
+  "Return non-nil if HEADLINE matches CLIENT-ID via property or tag."
+  (let ((client-prop (org-element-property :CLIENT headline))
+        (tags (org-element-property :tags headline)))
+    (or (string= client-prop client-id)
+        (member client-id tags))))
+
+(defun ip-invoice--process-clock-entry (clock-elem heading rate start-ts end-ts)
+  "Process single CLOCK-ELEM and return entry plist if within date range."
+  (when-let* ((ts (org-element-property :value clock-elem))
+              (duration-str (org-element-property :duration clock-elem))
+              (raw-ts (org-element-property :raw-value ts))
+              (clock-start (org-time-string-to-time raw-ts)))
+    
+    (when (and (time-less-p start-ts clock-start)
+               (time-less-p clock-start end-ts))
+      (let* ((parts (split-string duration-str ":"))
+             (hours (string-to-number (car parts)))
+             (minutes (if (> (length parts) 1) 
+                        (string-to-number (cadr parts)) 0))
+             (hours-float (+ hours (/ minutes 60.0)))
+             (amount (* hours-float rate))
+             (date (format-time-string "%Y-%m-%d" clock-start)))
+        
+        (ip-debug-log 'debug 'invoice "Clock entry: %s | %.2f h | %.2f EUR" 
+                    date hours-float amount)
+        
+        (list :date date
+              :description (encode-coding-string heading 'utf-8)
+              :hours (ip-invoice--format-amount hours-float)
+              :rate (ip-invoice--format-amount rate)
+              :amount (ip-invoice--format-amount amount))))))
 
 (defun ip-invoice--get-clock-entries (start end client-id)
   "Get clock entries for CLIENT-ID between START and END dates.
@@ -157,113 +251,154 @@ Returns list of plists with :date, :description, :hours, :rate, :amount."
         (unless client-data
           (error "Client not found: %s" client-id))
         
-        (let ((rate (string-to-number (or (plist-get client-data :DEFAULT_RATE) "0"))))
+        (let ((rate (ip-invoice--safe-string-to-number 
+                    (plist-get client-data :DEFAULT_RATE))))
+          (when (<= rate 0)
+            (error "Invalid or missing rate for client: %s" client-id))
+          
           (ip-debug-log 'info 'invoice "Using hourly rate: %.2f EUR" rate)
           
           (org-element-map (org-element-parse-buffer) 'headline
             (lambda (headline)
-              (let* ((heading (org-element-property :raw-value headline))
-                     (client-prop (org-element-property :CLIENT headline))
-                     (tags (org-element-property :tags headline))
-                     (matches-client (or (string= client-prop client-id)
-                                       (member client-id tags))))
-                
-                (when matches-client
+              (when (ip-invoice--client-matches-p headline client-id)
+                (let ((heading (org-element-property :raw-value headline)))
                   (ip-debug-log 'debug 'invoice "Processing task: %s" heading)
                   
                   (org-element-map (org-element-contents headline) 'clock
                     (lambda (clock-elem)
-                      (when-let* ((ts (org-element-property :value clock-elem))
-                                  (duration-str (org-element-property :duration clock-elem))
-                                  (raw-ts (org-element-property :raw-value ts))
-                                  (clock-start (org-time-string-to-time raw-ts)))
-                        
-                        (when (and (time-less-p start-ts clock-start)
-                                   (time-less-p clock-start end-ts))
-                          (let* ((parts (split-string duration-str ":"))
-                                 (hours (string-to-number (car parts)))
-                                 (minutes (if (> (length parts) 1) 
-                                            (string-to-number (cadr parts)) 0))
-                                 (hours-float (+ hours (/ minutes 60.0)))
-                                 (amount (* hours-float rate))
-                                 (date (format-time-string "%Y-%m-%d" clock-start)))
-                            
-                            (ip-debug-log 'debug 'invoice "Clock entry: %s | %.2f h | %.2f EUR" 
-                                        date hours-float amount)
-                            
-                            (push (list :date date
-                                       :description (encode-coding-string heading 'utf-8)
-                                       :hours (format "%.2f" hours-float)
-                                       :rate (format "%.2f" rate)
-                                       :amount (format "%.2f" amount))
-                                  entries))))))))))))
+                      (when-let ((entry (ip-invoice--process-clock-entry 
+                                        clock-elem heading rate start-ts end-ts)))
+                        (push entry entries)))))))))))
     
     (ip-debug-log 'info 'invoice "Found %d clock entries" (length entries))
     (sort entries (lambda (a b) (string< (plist-get a :date) (plist-get b :date))))))
 
-;;; QR Code Generation 
+;;; QR Code Generation
 
-(defun ip-invoice--generate-qr-code-data (company client total-rsd period invoice-id)
-  "Generate NBS IPS QR code by calling NBS API.
-Returns base64 encoded QR code image or fallback on error."
-  (let* ((model (plist-get company :MODEL))
-         (poziv-base (plist-get company :POZIV_BASE))
-         (base-poziv (format "%s-%s-%s" poziv-base period invoice-id))
-         (poziv-na-broj (ip-invoice--generate-mod97-reference base-poziv))
-         (clean-iban (when-let ((iban (plist-get company :IBAN)))
+(defun ip-invoice--build-qr-data (company client total-rsd period poziv-na-broj)
+  "Build QR code data string for NBS IPS format."
+  (let* ((clean-iban (when-let ((iban (plist-get company :IBAN)))
                        (and (string-match "RS..\\([0-9]\\{18\\}\\)" iban)
                             (match-string 1 iban))))
          (amount (string-replace "." "," total-rsd))
          (svrha (format "Uplata %s" period))
          (primalac (truncate-string-to-width
                     (concat (plist-get client :NAME) "\r" (plist-get client :ADDRESS))
-                    70 nil nil "..."))
-         (qr-data (format "K:PR|V:01|C:1|R:%s|N:%s|I:RSD%s|P:%s\r%s|SF:189|S:%s|RO:%s"
-                          (or clean-iban "000000000000000000")
-                          primalac
-                          amount
-                          (plist-get company :NAME)
-                          (plist-get company :ADDRESS)
-                          svrha
-                          (or poziv-na-broj "97-0000000000-DRAFT")))
+                    70 nil nil "...")))
+    
+    (format "K:PR|V:01|C:1|R:%s|N:%s|I:RSD%s|P:%s\r%s|SF:189|S:%s|RO:%s"
+            (or clean-iban "000000000000000000")
+            primalac
+            amount
+            (plist-get company :NAME)
+            (plist-get company :ADDRESS)
+            svrha
+            poziv-na-broj)))
+
+(defun ip-invoice--call-nbs-api (qr-data &optional size lang retries)
+  "Call NBS API to generate QR code from QR-DATA string.
+SIZE is the optional QR code size (e.g., '200x200'). Nil for default size.
+LANG is the language for error messages (sr_RS_Latn, sr_RS, or en; default sr_RS_Latn).
+RETRIES is the number of retry attempts on failure (default 3).
+Returns base64 encoded image or nil on error."
+  (let* ((size (or size ""))
+         (lang (or lang "sr_RS_Latn"))
+         (retries (or retries 3))
+         (url (format "%s%s?lang=%s"
+                      ip-invoice-nbs-qr-base-url
+                      (if (string-empty-p size) "" (concat "/" size))
+                      lang))
          (encoded-data (encode-coding-string qr-data 'utf-8 t)))
+    (ip-debug-log 'info 'invoice "📡 [QR] Sending request to NBS API: %s (retries left: %d)" url retries)
+    (ip-debug-log 'debug 'invoice "📝 [QR] Raw QR data: %s" qr-data)
+    (ip-debug-log 'debug 'invoice "📤 [QR] Encoded data: %s" encoded-data)
 
-    (ip-debug-log 'info 'invoice "Generating QR code via NBS API")
-    (ip-debug-log 'debug 'invoice "QR data: %s" qr-data)
-
-    (condition-case err
-        (let ((response (deferred:sync!
-                         (request-deferred ip-invoice-nbs-qr-generate-url
-                                           :type "POST"
-                                           :headers '(("Content-Type" . "text/plain"))
-                                           :data encoded-data
-                                           :parser 'json-read
-                                           :success (lambda (&rest args &key data &allow-other-keys)
-                                                      (ip-debug-log 'debug 'invoice "NBS API response: %S" data)
-                                                      (when-let* ((status (plist-get data :s))
-                                                                  (code (plist-get status :code)))
-                                                        (if (eq code 0)
-                                                            (plist-get data :i)
-                                                          (progn
-                                                            (ip-debug-log 'error 'invoice "NBS API error: %s" 
-                                                                        (plist-get status :desc))
-                                                            nil))))
-                                           :error (lambda (&rest args &key error-thrown &allow-other-keys)
-                                                    (ip-debug-log 'error 'invoice "HTTP error: %s" error-thrown)
-                                                    nil)))))
-          (if (stringp response)
-              (progn
-                (ip-debug-log 'success 'invoice "QR code generated successfully")
-                response)
-            (progn
-              (ip-debug-log 'warning 'invoice "Using fallback QR code")
-              ;; Fallback 1x1 transparent PNG
-              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")))
+    (condition-case error-info
+        (let ((result
+               (deferred:sync!
+                (deferred:$
+                 (request-deferred
+                  url
+                  :type "POST"
+                  :headers '(("Content-Type" . "text/plain"))
+                  :data encoded-data
+                  :parser 'json-read
+                  :success (cl-function
+                            (lambda (&key data &allow-other-keys)
+                              (ip-debug-log 'debug 'invoice "✅ [QR] Raw JSON response received: %S" data)
+                              (if data
+                                  (let* ((status-cell (assoc 's data))
+                                         (status (cdr status-cell))
+                                         (code (cdr (assoc 'code status)))
+                                         (desc (cdr (assoc 'desc status))))
+                                    (ip-debug-log 'debug 'invoice "🔢 [QR] Response code: %s, description: %s" code desc)
+                                    (if (zerop code)
+                                        (let ((image-data (cdr (assoc 'i data))))
+                                          (if (and image-data (stringp image-data))
+                                              (progn
+                                                (ip-debug-log 'success 'invoice "🎉 [QR] QR code successfully generated by NBS API")
+                                                image-data)
+                                            (ip-debug-log 'error 'invoice "❌ [QR] Invalid or missing :i field: %s" image-data)
+                                            nil))
+                                      (ip-debug-log 'error 'invoice "❌ [QR] NBS API returned error: %s (code %s)" desc code)
+                                      nil))
+                                (ip-debug-log 'error 'invoice "❌ [QR] Response data is empty")
+                                nil)))
+                  :error (cl-function
+                          (lambda (&key error-thrown &allow-other-keys)
+                            (ip-debug-log 'error 'invoice "🔴 [QR] HTTP request failed: %s" error-thrown)
+                            (if (> retries 0)
+                                (progn
+                                  (ip-debug-log 'warning 'invoice "Retrying NBS API call (%d attempts left)" retries)
+                                  (sleep-for 1)
+                                  (ip-invoice--call-nbs-api qr-data size lang (1- retries)))
+                              nil))))
+                 (deferred:nextc it
+                   (lambda (response)
+                     (if (request-response-p response)
+                         (let ((data (request-response-data response)))
+                           (if (and (consp data) (assoc 'i data))
+                               (cdr (assoc 'i data))
+                             nil))
+                       response)))))))
+          (ip-debug-log 'debug 'invoice "📤 [QR] API call result: %S (type: %s)" result (type-of result))
+          result)
       (error
-       (ip-debug-log 'error 'invoice "QR generation failed: %s" (error-message-string err))
-       ;; Fallback QR code
-       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))))
+       (ip-debug-log 'error 'invoice "💥 [QR] Unexpected error during QR generation: %s" (error-message-string error-info))
+       nil))))
 
+(defun ip-invoice--generate-qr-code-data (company client total-rsd period invoice-id)
+  "Generate NBS IPS QR code by calling NBS API.
+Returns base64 encoded QR code image or fallback on error."
+  (unless (and (plist-get company :POZIV_BASE)
+               (plist-get company :IBAN)
+               (plist-get company :NAME)
+               (plist-get company :ADDRESS)
+               (plist-get client :NAME)
+               (plist-get client :ADDRESS))
+    (ip-debug-log 'error 'invoice "Missing required company or client data for QR code")
+    (error "Missing required company or client data for QR code"))
+  
+  (let* ((poziv-base (plist-get company :POZIV_BASE))
+         (base-poziv (format "%s-%s-%s" poziv-base period invoice-id))
+         (poziv-na-broj (ip-invoice--generate-mod97-reference base-poziv))
+         (qr-data (ip-invoice--build-qr-data company client total-rsd period poziv-na-broj))
+         (qr-result (ip-invoice--call-nbs-api qr-data ip-invoice-qr-size ip-invoice-qr-lang)))
+    
+    (ip-debug-log 'debug 'invoice "Reference number: %s" poziv-na-broj)
+    (ip-debug-log 'debug 'invoice "QR data: %s" qr-data)
+    (ip-debug-log 'debug 'invoice "QR result: %S (type: %s)" qr-result (type-of qr-result))
+    
+    (if (and qr-result (stringp qr-result) (not (string-empty-p qr-result)))
+        (progn
+          (ip-debug-log 'success 'invoice "✅ [QR] Using API-generated QR code")
+          qr-result)
+      (progn
+        (ip-debug-log 'warning 'invoice "⚠️ [QR] Using fallback QR code due to invalid API response: %S (type: %s)" qr-result (type-of qr-result))
+        (if ip-invoice-qr-fallback
+            ip-invoice-qr-fallback
+          (error "QR code generation failed and no fallback configured"))))))
+        
 ;;; Data Processing
 
 (defun ip-invoice--aggregate-tasks (tasks)
@@ -272,9 +407,10 @@ Returns list of aggregated task plists."
   (let ((aggregated (make-hash-table :test 'equal)))
     (dolist (task tasks)
       (let* ((desc (plist-get task :description))
-             (hours (string-to-number (plist-get task :hours)))
-             (amount (string-to-number (plist-get task :amount)))
+             (hours (ip-invoice--safe-string-to-number (plist-get task :hours)))
+             (amount (ip-invoice--safe-string-to-number (plist-get task :amount)))
              (existing (gethash desc aggregated)))
+        
         (if existing
             (puthash desc
                      (list :description desc
@@ -290,8 +426,8 @@ Returns list of aggregated task plists."
     (let (result)
       (maphash (lambda (desc data)
                  (push (list :description desc
-                            :total_hours (format "%.2f" (plist-get data :total_hours))
-                            :amount (format "%.2f" (plist-get data :amount)))
+                            :total_hours (ip-invoice--format-amount (plist-get data :total_hours))
+                            :amount (ip-invoice--format-amount (plist-get data :amount)))
                        result))
                aggregated)
       (sort result (lambda (a b) 
@@ -318,10 +454,27 @@ Handles nested plists and lists of plists."
 
 ;;; Invoice Generation
 
+(defun ip-invoice--calculate-totals (tasks-raw tax-rate exchange-rate)
+  "Calculate invoice totals from TASKS-RAW with TAX-RATE and EXCHANGE-RATE.
+Returns plist with :subtotal, :tax-amount, :total-eur, :total-rsd."
+  (let* ((subtotal (cl-reduce (lambda (sum task)
+                               (+ sum (ip-invoice--safe-string-to-number 
+                                      (plist-get task :amount))))
+                             tasks-raw :initial-value 0.0))
+         (tax-amount (* subtotal (/ tax-rate 100.0)))
+         (total-eur (+ subtotal tax-amount))
+         (total-rsd (* total-eur exchange-rate)))
+    
+    (list :subtotal subtotal
+          :tax-amount tax-amount
+          :total-eur total-eur
+          :total-rsd total-rsd)))
+
 (defun ip-invoice-generate-data (client-id start end &optional state)
   "Generate invoice data for CLIENT-ID from START to END.
-STATE can be 'final or 'draft (default)."
-  (ip-debug-log 'info 'invoice "Generating invoice data for %s (%s to %s)" client-id start end)
+STATE can be \='final or \='draft (default)."
+  (ip-debug-log 'info 'invoice "Generating invoice data for %s (%s to %s)" 
+              client-id start end)
   
   (let* ((client-id (string-trim client-id))
          (client (ip-get-client-by-id client-id))
@@ -329,9 +482,11 @@ STATE can be 'final or 'draft (default)."
     
     (unless client
       (error "Unknown client ID: %s" client-id))
+    (unless company
+      (error "Company information not available"))
     
     (let* ((currency (or (plist-get client :CURRENCY) "EUR"))
-           (tax-rate (string-to-number (or (plist-get client :TAX_RATE) "0")))
+           (tax-rate (ip-invoice--safe-string-to-number (plist-get client :TAX_RATE)))
            (invoice-id (if (eq state 'final)
                           (ip-invoice--generate-invoice-id)
                         (format "DRAFT-%s-%s" client-id (format-time-string "%Y%m%d"))))
@@ -339,27 +494,26 @@ STATE can be 'final or 'draft (default)."
            (due-date (format-time-string "%Y-%m-%d" 
                                        (time-add (date-to-time end) 
                                                (days-to-time ip-invoice-default-due-days))))
-           (exchange-rate ip-invoice-default-exchange-rate)
            (period (format-time-string "%Y-%m" (date-to-time start)))
+           (poziv-base (plist-get company :POZIV_BASE))
+           (base-poziv (format "%s-%s-%s" poziv-base period invoice-id))
            
            ;; Get and process tasks
            (tasks-raw (ip-invoice--get-clock-entries start end client-id))
            (tasks-aggregated (ip-invoice--aggregate-tasks tasks-raw))
            
            ;; Calculate totals
-           (subtotal (cl-reduce (lambda (sum task)
-                                (+ sum (string-to-number (plist-get task :amount))))
-                              tasks-raw :initial-value 0.0))
-           (tax-amount (* subtotal (/ tax-rate 100.0)))
-           (total-amount-eur (+ subtotal tax-amount))
-           (total-amount-rsd (* total-amount-eur exchange-rate))
+           (totals (ip-invoice--calculate-totals tasks-raw tax-rate ip-invoice-default-exchange-rate))
            
            ;; Generate QR code
            (qr-code (when ip-invoice-include-payment-slip
                      (ip-invoice--generate-qr-code-data
                       company client
-                      (format "%.2f" total-amount-rsd)
+                      (ip-invoice--format-amount (plist-get totals :total-rsd))
                       period invoice-id))))
+      
+      (when (null tasks-raw)
+        (ip-debug-log 'warning 'invoice "No tasks found for period %s to %s" start end))
       
       ;; Return complete invoice data
       (list :client client
@@ -374,12 +528,13 @@ STATE can be 'final or 'draft (default)."
             :period period
             :tasks-plain tasks-raw
             :tasks-aggregated tasks-aggregated
-            :subtotal (format "%.2f" subtotal)
+            :subtotal (ip-invoice--format-amount (plist-get totals :subtotal))
             :tax-rate tax-rate
-            :tax-amount (format "%.2f" tax-amount)
-            :total (format "%.2f" total-amount-eur)
-            :total_rsd (format "%.2f" total-amount-rsd)
-            :exchange_rate (format "%.2f" exchange-rate)
+            :tax-amount (ip-invoice--format-amount (plist-get totals :tax-amount))
+            :total (ip-invoice--format-amount (plist-get totals :total-eur))
+            :total_rsd (ip-invoice--format-amount (plist-get totals :total-rsd))
+            :exchange_rate (ip-invoice--format-amount ip-invoice-default-exchange-rate)
+            :poziv-na-broj (ip-invoice--generate-mod97-reference base-poziv)
             :payment_slip ip-invoice-include-payment-slip
             :qr_code qr-code))))
 
@@ -408,7 +563,7 @@ STATE can be 'final or 'draft (default)."
 
 (defun ip-invoice-generate (client-id start end &optional state)
   "Generate an invoice for CLIENT-ID from START to END and save to file.
-STATE can be 'final or 'draft. Returns path to generated file."
+STATE can be \='final or \='draft. Returns path to generated file."
   (let* ((invoice (ip-invoice-generate-data client-id start end state))
          (output-dir (if (eq state 'final) ip-invoice-final-dir ip-invoice-draft-dir))
          (output-file (expand-file-name 
