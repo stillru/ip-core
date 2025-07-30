@@ -276,7 +276,7 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
     (while plist
       (let ((key (car plist))
             (value (cadr plist)))
-        (push (cons (substring (symbol-name key) 1)
+        (push (cons (downcase (substring (symbol-name key) 1))
                     (cond
                      ;; 1. Если это plist (список с keyword в начале)
                      ((and (listp value) (keywordp (car-safe value)))
