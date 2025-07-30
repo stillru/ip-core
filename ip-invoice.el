@@ -180,37 +180,46 @@ Returns a plist with :tasks-plain and :tasks-aggregated."
          (tasks-plain ())
          (tasks-aggregated (make-hash-table :test 'equal))
          (subtotal 0.0))
-(let ((entries (ip-invoice--get-clock-entries start end client-id)))
-  (ip-debug-log 'info 'invoice "📥 [DATA] Получено %d записей из ip-invoice--get-clock-entries" (length entries))
-  (dolist (entry entries)
-    (ip-debug-log 'info 'invoice "🔍 [DATA] Обработка записи: %S" entry)
-    (let* ((desc (plist-get entry :description))
-           (hours (string-to-number (plist-get entry :hours)))
-           (rate (string-to-number (plist-get entry :rate)))
-           (amount (* hours rate)))
-      (ip-debug-log 'info 'invoice "📊 [DATA] Описание: %s | Часы: %.2f | Ставка: %.2f | Сумма: %.2f" desc hours rate amount)
-      (push entry tasks-plain)
-      (ip-debug-log 'info 'invoice "✅ [DATA] Добавлено в tasks-plain")
-      (let ((agg (gethash desc tasks-aggregated)))
-        (if agg
-            (progn
-              (ip-debug-log 'info 'invoice "📊 [DATA] Обновление агрегированной записи для: %s" desc)
-              (puthash desc
-                       (list :description desc
-                             :total_hours (+ (plist-get agg :total_hours) hours)
-                             :amount (+ (plist-get agg :amount) amount))
-                       tasks-aggregated))
-          (progn
-            (ip-debug-log 'info 'invoice "🆕 [DATA] Создание новой агрегированной записи для: %s" desc)
-            (puthash desc
-                     (list :description desc
-                           :total_hours hours
-                           :amount amount)
-                     tasks-aggregated))))
-      (setq subtotal (+ subtotal amount))
-      (ip-debug-log 'info 'invoice "🧮 [DATA] Подытог: %.2f EUR" subtotal))))
+    ;; Загружаем записи
+    (let ((entries (ip-invoice--get-clock-entries start end client-id)))
+      (ip-debug-log 'info 'invoice "📥 [DATA] Получено %d записей из ip-invoice--get-clock-entries" (length entries))
+      (dolist (entry entries)
+        (ip-debug-log 'info 'invoice "🔍 [DATA] Обработка записи: %S" entry)
+        (let* ((desc (plist-get entry :description))
+               (hours (string-to-number (plist-get entry :hours)))
+               (rate (string-to-number (plist-get entry :rate)))
+               (amount (* hours rate)))
+          (ip-debug-log 'info 'invoice "📊 [DATA] Описание: %s | Часы: %.2f | Ставка: %.2f | Сумма: %.2f" desc hours rate amount)
+          (push entry tasks-plain)
+          (ip-debug-log 'info 'invoice "✅ [DATA] Добавлено в tasks-plain")
+          (let ((agg (gethash desc tasks-aggregated)))
+            (if agg
+                (progn
+                  (ip-debug-log 'info 'invoice "📊 [DATA] Обновление агрегированной записи для: %s" desc)
+                  (puthash desc
+                           (list :description desc
+                                 :total_hours (+ (plist-get agg :total_hours) hours)
+                                 :amount (+ (plist-get agg :amount) amount))
+                           tasks-aggregated))
+              (progn
+                (ip-debug-log 'info 'invoice "🆕 [DATA] Создание новой агрегированной записи для: %s" desc)
+                (puthash desc
+                         (list :description desc
+                               :total_hours hours
+                               :amount amount)
+                         tasks-aggregated))))
+          (setq subtotal (+ subtotal amount))
+          (ip-debug-log 'info 'invoice "🧮 [DATA] Подытог: %.2f EUR" subtotal))))
+
     ;; Преобразуем hash-table в список
-    (let 
+    (let ((aggregated-list (let (result)
+                             (maphash (lambda (desc data)
+                                        (push (list :description desc
+                                                    :total_hours (format "%.2f" (plist-get data :total_hours))
+                                                    :amount (format "%.2f" (plist-get data :amount)))
+                                              result))
+                                      tasks-aggregated)
+                             (nreverse result))))
       ;; Сортируем
       (setq tasks-plain (sort tasks-plain (lambda (a b) (string< (plist-get a :date) (plist-get b :date)))))
       (setq aggregated-list (sort aggregated-list (lambda (a b) (string< (plist-get a :description) (plist-get b :description)))))
