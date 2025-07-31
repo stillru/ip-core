@@ -278,8 +278,8 @@ MESSAGE is the format string, followed by ARGS."
          (scheduled-str (when created (format "SCHEDULED: <%s>" (ip-forgejo--format-org-timestamp created))))
          (deadline-str (when due-date (format "DEADLINE: <%s>" (ip-forgejo--format-org-timestamp due-date))))
          ;; Build the entry - убираем CLIENT из свойств, используем только теги
-         (properties-str (format ":PROPERTIES:\n:ID: %s\n:FORGEJO_URL: %s\n:STATE: %s\n:REPO: %s\n:TIME: %d\n:END:"
-                                 org-id issue-url state repo-name total-time))
+         (properties-str (format ":PROPERTIES:\n:ID: %s\n:FORGEJO_URL: %s\n:STATE: %s\n:REPO: %s\n:TIME: %d\n:ID_ISSUE: %s\n:END:"
+                                 org-id issue-url state repo-name total-time id))
          (logbook-block (if (string-empty-p logbook)
                             ""
                           (format ":LOGBOOK:\n%s\n:END:" logbook)))
