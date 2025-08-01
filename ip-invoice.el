@@ -183,9 +183,29 @@ Returns string in format XX-BASE-STRING, truncated to fit max length."
     (format "%04d-%02d-%02d" year month 
             (if (listp last-day) (cadr last-day) last-day))))
 
-(defun ip-invoice--generate-invoice-id ()
-  "Generate a unique invoice ID with timestamp."
-  (format-time-string "INV-%Y%m%d-%H%M%S"))
+(defun ip-invoice--generate-invoice-id (name)
+  "Generate a unique invoice ID with timestamp and sequential number.
+DIRECTORY is the path to the folder containing invoice files (defaults to `default-directory')."
+  (let* ((dir (or ip-invoice-final-dir))
+         (year (format-time-string "%Y"))
+         (prefix (concat name "-"))
+         ;; Find all files in the directory matching the pattern INV-YYYY-*
+         (existing-files (directory-files dir nil (concat "^" prefix "[0-9]+")))
+         ;; Extract the highest sequential number
+         (max-number (if existing-files
+                         (apply #'max
+                                (mapcar (lambda (file)
+                                          (string-to-number
+                                           (replace-regexp-in-string
+                                            (concat "^" prefix "\\([0-9]+\\)") "\\1" file)))
+                                        existing-files))
+                       0)))
+    ;; Generate the new invoice ID with the next number, padded with zeros
+    (format "%s%03d" prefix (+ max-number 1))))
+
+;(defun ip-invoice--generate-invoice-id (name)
+;  "Generate a unique invoice ID with timestamp."
+;  (format-time-string "name-%Y-"))
 
 (defun ip-invoice--format-amount (amount)
   "Format AMOUNT as string with 2 decimal places."
@@ -488,7 +508,7 @@ STATE can be \='final or \='draft (default)."
     (let* ((currency (or (plist-get client :CURRENCY) "EUR"))
            (tax-rate (ip-invoice--safe-string-to-number (plist-get client :TAX_RATE)))
            (invoice-id (if (eq state 'final)
-                          (ip-invoice--generate-invoice-id)
+                          (ip-invoice--generate-invoice-id (plist-get client :ID))
                         (format "DRAFT-%s-%s" client-id (format-time-string "%Y%m%d"))))
            (generated (format-time-string "%Y-%m-%d"))
            (due-date (format-time-string "%Y-%m-%d" 
@@ -496,7 +516,7 @@ STATE can be \='final or \='draft (default)."
                                                (days-to-time ip-invoice-default-due-days))))
            (period (format-time-string "%Y-%m" (date-to-time start)))
            (poziv-base (plist-get company :POZIV_BASE))
-           (base-poziv (format "%s-%s-%s" poziv-base period invoice-id))
+           (base-poziv (format "%s%s" poziv-base period))
            
            ;; Get and process tasks
            (tasks-raw (ip-invoice--get-clock-entries start end client-id))
@@ -567,7 +587,7 @@ STATE can be \='final or \='draft. Returns path to generated file."
   (let* ((invoice (ip-invoice-generate-data client-id start end state))
          (output-dir (if (eq state 'final) ip-invoice-final-dir ip-invoice-draft-dir))
          (output-file (expand-file-name 
-                      (format "%s-%s.html" client-id (plist-get invoice :invoice-id)) 
+                      (format "%s.html" (plist-get invoice :invoice-id)) 
                       output-dir)))
     
     (unless (file-directory-p output-dir)
