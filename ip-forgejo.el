@@ -425,15 +425,29 @@ HEADERS is optional list of additional HTTP headers."
 ;;; Issue Management
 
 (defun ip-forgejo--find-entry-by-url (issue-url)
-  "Find Org heading by FORGEJO_URL property."
+  "Find Org heading by FORGEJO_URL property.
+Search both in properties drawer and anywhere in the entry."
   (save-excursion
     (goto-char (point-min))
     (catch 'found
-      (while (re-search-forward ":FORGEJO_URL:[ \t]+" nil t)
-        (let ((url-start (point))
-              (url-end (line-end-position)))
-          (when (string-equal (buffer-substring-no-properties url-start url-end)
-                             issue-url)
+      ;; Search in properties drawer
+      (while (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+\\(.*\\)" nil t)
+        (let ((url (match-string 1)))
+          (when (string-equal url issue-url)
+            (org-back-to-heading t)
+            (throw 'found (point)))))
+      
+      ;; Fallback: search anywhere in the entry (more robust)
+      (goto-char (point-min))
+      (while (re-search-forward (regexp-quote issue-url) nil t)
+        (save-excursion
+          (goto-char (match-beginning 0))
+          (when (org-at-heading-p)
+            (org-back-to-heading t)
+            (throw 'found (point)))
+          ;; Check if we're inside a properties drawer
+          (when (and (re-search-backward "^\\s-*:PROPERTIES:" (line-beginning-position) t)
+                     (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+" (line-end-position) t))
             (org-back-to-heading t)
             (throw 'found (point)))))
       nil)))
@@ -816,6 +830,7 @@ Imports both open and closed issues."
                (length (ip-forgejo--ensure-list closed-issues-data))))))
 
 ;;;###autoload
+;;;###autoload
 (defun ip-forgejo-push-current-entry ()
   "Push current Org entry state and deadline back to Forgejo."
   (interactive)
@@ -832,14 +847,23 @@ Imports both open and closed issues."
                                        (point))))
                     (buffer-substring-no-properties content-start content-end)))))
 
+      ;; Alternative method to find FORGEJO_URL if org-entry-get fails
+      (unless forgejo-url
+        (save-excursion
+          (org-end-of-meta-data t)
+          (when (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+\\(.*\\)" 
+                                  (save-excursion (org-end-of-subtree t) (point)) t)
+            (setq forgejo-url (match-string 1)))))
+
       (unless forgejo-url
         (ip-forgejo--log 'error "Current entry is not a Forgejo issue")
         (error "Current entry is not a Forgejo issue"))
 
       (let ((forgejo-state (ip-forgejo--forgejo-state todo-state)))
+        (ip-forgejo--log 'info "Pushing update to %s: state=%s" forgejo-url forgejo-state)
         (ip-forgejo--push-issue forgejo-url title body forgejo-state)
         (ip-forgejo--push-deadline forgejo-url)
-        (message "Pushed changes to Forgejo issue")))))
+        (message "Pushed changes to Forgejo issue: %s" forgejo-url)))))
 
 ;;;###autoload
 (defun ip-forgejo-clock-in-and-log ()
