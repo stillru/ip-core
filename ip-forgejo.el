@@ -480,7 +480,7 @@
           (ip-forgejo--log 'success "%s entry: %s"
                            (if (ip-forgejo--find-entry-by-url issue-url) "Updated" "Inserted")
                            issue-url)
-        (ip-forgejo--log 'warning "Finished processing entry for %s" issue-url)))))
+        (ip-forgejo--log 'warning "Finished processing entry for %s" issue-url))))))
 
 ;;; Issue Synchronization
 
