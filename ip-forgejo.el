@@ -830,6 +830,31 @@ Imports both open and closed issues."
                (length (ip-forgejo--ensure-list closed-issues-data))))))
 
 ;;;###autoload
+(defun ip-forgejo-debug-current-entry ()
+  "Debug information about current Org entry for Forgejo integration."
+  (interactive)
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((forgejo-url (org-entry-get nil "FORGEJO_URL"))
+          (todo-state (org-get-todo-state))
+          (title (nth 4 (org-heading-components)))
+          (properties (org-entry-properties)))
+      
+      (message "=== Forgejo Debug Info ===")
+      (message "Title: %s" title)
+      (message "TODO state: %s" todo-state)
+      (message "FORGEJO_URL (org-entry-get): %s" forgejo-url)
+      
+      ;; Alternative search
+      (save-excursion
+        (org-end-of-meta-data t)
+        (when (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+\\(.*\\)" 
+                                (save-excursion (org-end-of-subtree t) (point)) t)
+          (message "FORGEJO_URL (regexp): %s" (match-string 1))))
+      
+      (message "All properties: %s" properties)
+      (message "========================"))))
+
 ;;;###autoload
 (defun ip-forgejo-push-current-entry ()
   "Push current Org entry state and deadline back to Forgejo."
