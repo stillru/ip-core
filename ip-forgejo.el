@@ -121,6 +121,21 @@ Format: ((NAME . ((\"base-url\" . URL) (\"token\" . TOKEN)))...)"
 
 ;;; Utility Functions
 
+(defun ip-forgejo-validate-property-syntax ()
+  "Check if FORGEJO_URL property has correct syntax in current entry."
+  (interactive)
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((url (ip-forgejo--get-forgejo-url-from-current-entry)))
+      (if url
+          (progn
+            (message "✓ FORGEJO_URL found: %s" url)
+            ;; Check if it's a valid URL
+            (if (string-match-p "https?://" url)
+                (message "✓ URL syntax appears valid")
+              (message "⚠ URL may have syntax issues")))
+        (message "✗ FORGEJO_URL not found in current entry")))))
+
 (defun ip-forgejo--current-config ()
   "Return (base-url . token) for current instance."
   (let* ((instance (assoc ip-forgejo-current-instance ip-forgejo-instances)))
@@ -425,30 +440,14 @@ HEADERS is optional list of additional HTTP headers."
 ;;; Issue Management
 
 (defun ip-forgejo--find-entry-by-url (issue-url)
-  "Find Org heading by FORGEJO_URL property.
-Search both in properties drawer and anywhere in the entry."
+  "Find Org heading by FORGEJO_URL property."
   (save-excursion
     (goto-char (point-min))
     (catch 'found
-      ;; Search in properties drawer
-      (while (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+\\(.*\\)" nil t)
-        (let ((url (match-string 1)))
-          (when (string-equal url issue-url)
-            (org-back-to-heading t)
-            (throw 'found (point)))))
-      
-      ;; Fallback: search anywhere in the entry (more robust)
-      (goto-char (point-min))
-      (while (re-search-forward (regexp-quote issue-url) nil t)
-        (save-excursion
-          (goto-char (match-beginning 0))
-          (when (org-at-heading-p)
-            (org-back-to-heading t)
-            (throw 'found (point)))
-          ;; Check if we're inside a properties drawer
-          (when (and (re-search-backward "^\\s-*:PROPERTIES:" (line-beginning-position) t)
-                     (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+" (line-end-position) t))
-            (org-back-to-heading t)
+      (while (re-search-forward "^\\*+ " nil t)
+        (let ((heading-start (match-beginning 0)))
+          (goto-char heading-start)
+          (when (string-equal (ip-forgejo--get-forgejo-url-from-current-entry) issue-url)
             (throw 'found (point)))))
       nil)))
 
@@ -563,6 +562,30 @@ by disabling it completely and performing updates in a more controlled manner."
       :error (cl-function (lambda (&key error-thrown &allow-other-keys)
                             (ip-forgejo--log 'error "Failed to update issue %s: %s"
                                              api-url error-thrown))))))
+
+(defun ip-forgejo--get-forgejo-url-from-current-entry ()
+  "Extract FORGEJO_URL from current Org entry using multiple methods."
+  (save-excursion
+    (org-back-to-heading t)
+    (let (url)
+      ;; Method 1: Try org-entry-get (for standard properties)
+      (setq url (org-entry-get nil "FORGEJO_URL"))
+      
+      ;; Method 2: Search in properties drawer
+      (unless url
+        (save-excursion
+          (when (re-search-forward "^\\s-*:PROPERTIES:" (save-excursion (org-end-of-subtree t) (point)) t)
+            (when (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+\\(.*\\)" (save-excursion (re-search-forward "^\\s-*:END:" (point-max) t) (point)) t)
+              (setq url (string-trim (match-string 1)))))))
+      
+      ;; Method 3: Search anywhere in the entry
+      (unless url
+        (save-excursion
+          (let ((end (save-excursion (org-end-of-subtree t) (point))))
+            (when (re-search-forward ":FORGEJO_URL:\\s-+\\([^\n]+\\)" end t)
+              (setq url (string-trim (match-string 1)))))))
+      
+      url)))
 
 (defun ip-forgejo--push-deadline (issue-url &optional repo-owner repo-name)
   "Push DEADLINE from current Org entry to Forgejo issue\='s duedate using ISSUE-URL and optional REPO-OWNER and REPO-NAME."
@@ -835,7 +858,7 @@ Imports both open and closed issues."
   (interactive)
   (save-excursion
     (org-back-to-heading t)
-    (let ((forgejo-url (org-entry-get nil "FORGEJO_URL"))
+    (let ((forgejo-url (ip-forgejo--get-forgejo-url-from-current-entry))
           (todo-state (org-get-todo-state))
           (title (nth 4 (org-heading-components)))
           (properties (org-entry-properties)))
@@ -843,20 +866,48 @@ Imports both open and closed issues."
       (message "=== Forgejo Debug Info ===")
       (message "Title: %s" title)
       (message "TODO state: %s" todo-state)
-      (message "FORGEJO_URL (org-entry-get): %s" forgejo-url)
+      (message "FORGEJO_URL (found): %s" forgejo-url)
       
-      ;; Alternative search
+      ;; Show raw properties drawer content
       (save-excursion
         (org-end-of-meta-data t)
-        (when (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+\\(.*\\)" 
-                                (save-excursion (org-end-of-subtree t) (point)) t)
-          (message "FORGEJO_URL (regexp): %s" (match-string 1))))
+        (when (re-search-forward "^\\s-*:PROPERTIES:" (save-excursion (org-end-of-subtree t) (point)) t)
+          (let ((props-start (point)))
+            (when (re-search-forward "^\\s-*:END:" (point-max) t)
+              (let ((props-end (match-beginning 0))
+                    (props-content (buffer-substring-no-properties props-start props-end)))
+                (message "Properties drawer content:")
+                (message "%s" props-content))))))
       
-      (message "All properties: %s" properties)
+      (message "All standard properties: %s" properties)
       (message "========================"))))
 
 ;;;###autoload
 (defun ip-forgejo-push-current-entry ()
+  "Push current Org entry state and deadline back to Forgejo."
+  (interactive)
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((forgejo-url (ip-forgejo--get-forgejo-url-from-current-entry))
+          (todo-state (org-get-todo-state))
+          (title (nth 4 (org-heading-components)))
+          (body (save-excursion
+                  (org-end-of-meta-data t)
+                  (let ((content-start (point))
+                        (content-end (save-excursion
+                                       (org-end-of-subtree t)
+                                       (point))))
+                    (buffer-substring-no-properties content-start content-end)))))
+
+      (unless forgejo-url
+        (ip-forgejo--log 'error "Current entry is not a Forgejo issue")
+        (error "Current entry is not a Forgejo issue. FORGEJO_URL not found."))
+
+      (let ((forgejo-state (ip-forgejo--forgejo-state todo-state)))
+        (ip-forgejo--log 'info "Pushing update to %s: state=%s" forgejo-url forgejo-state)
+        (ip-forgejo--push-issue forgejo-url title body forgejo-state)
+        (ip-forgejo--push-deadline forgejo-url)
+        (message "Pushed changes to Forgejo issue: %s" forgejo-url)))))
   "Push current Org entry state and deadline back to Forgejo."
   (interactive)
   (save-excursion
@@ -888,7 +939,7 @@ Imports both open and closed issues."
         (ip-forgejo--log 'info "Pushing update to %s: state=%s" forgejo-url forgejo-state)
         (ip-forgejo--push-issue forgejo-url title body forgejo-state)
         (ip-forgejo--push-deadline forgejo-url)
-        (message "Pushed changes to Forgejo issue: %s" forgejo-url)))))
+        (message "Pushed changes to Forgejo issue: %s" forgejo-url))))
 
 ;;;###autoload
 (defun ip-forgejo-clock-in-and-log ()
