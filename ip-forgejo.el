@@ -121,6 +121,7 @@ Format: ((NAME . ((\"base-url\" . URL) (\"token\" . TOKEN)))...)"
 
 ;;; Utility Functions
 
+;;;autoload
 (defun ip-forgejo-validate-property-syntax ()
   "Check if FORGEJO_URL property has correct syntax in current entry."
   (interactive)
