@@ -9,7 +9,7 @@
 ;;; Commentary:
 
 ;; This module handles synchronization between Forgejo issues and Org-mode.
-;; 
+;;
 ;; Features:
 ;; - Import assigned Forgejo issues as Org-mode tasks
 ;; - Synchronize issue status, deadlines, and time logs
@@ -50,13 +50,13 @@
      (let ((formatted-msg (apply #'format message args))
            (level-str (pcase level
                         ('info "INFO")
-                        ('success "SUCCESS") 
+                        ('success "SUCCESS")
                         ('warning "WARNING")
                         ('error "ERROR")
                         (_ "DEBUG")))
            (module-str (upcase (symbol-name module))))
        (message "[%s/%s] %s" module-str level-str formatted-msg)))
-   
+
    (defmacro ip-debug (module message &rest args)
      "Fallback debug macro that uses `ip-debug-log'."
      `(ip-debug-log 'info ,module ,message ,@args))))
@@ -77,7 +77,7 @@
                   ("token"    . "52ba51cd10ba0250444d872e10ac1dd730cee076"))))
   "List of Forgejo instances configuration.
 Format: ((NAME . ((\"base-url\" . URL) (\"token\" . TOKEN)))...)"
-  :type '(alist :key-type string 
+  :type '(alist :key-type string
                 :value-type (alist :key-type string :value-type string))
   :group 'ip-forgejo)
 
@@ -125,7 +125,7 @@ Format: ((NAME . ((\"base-url\" . URL) (\"token\" . TOKEN)))...)"
   "Return (base-url . token) for current instance."
   (let* ((instance (assoc ip-forgejo-current-instance ip-forgejo-instances)))
     (unless instance
-      (ip-debug-log 'error 'forgejo "Unknown Forgejo instance: %s" 
+      (ip-debug-log 'error 'forgejo "Unknown Forgejo instance: %s"
                     ip-forgejo-current-instance)
       (user-error "Unknown Forgejo instance: %s" ip-forgejo-current-instance))
     (let ((config (cdr instance)))
@@ -154,7 +154,7 @@ Format: ((NAME . ((\"base-url\" . URL) (\"token\" . TOKEN)))...)"
 
 (defun ip-forgejo--format-org-timestamp (iso8601-str)
   "Convert ISO 8601 string to Org-mode timestamp format."
-  (when iso8601-str
+  (when (and iso8601-str (not (string-empty-p iso8601-str)))
     (let ((time (ignore-errors (date-to-time iso8601-str))))
       (when time
         (format-time-string "%Y-%m-%d %a" time)))))
@@ -222,9 +222,9 @@ MAX-RETRIES is maximum number of retry attempts."
          (retries (or max-retries ip-forgejo-max-retries))
          (delay 1)
          result)
-    
+
     (ip-forgejo--log 'info "Request: GET %s (retries: %d)" url retries)
-    
+
     (while (and (> retries 0) (not result))
       (condition-case err
           (let* ((response
@@ -239,17 +239,17 @@ MAX-RETRIES is maximum number of retry attempts."
                                                             :null-object nil
                                                             :false-object :false)
                                        (error
-                                        (ip-forgejo--log 'error "JSON parse error: %s" 
+                                        (ip-forgejo--log 'error "JSON parse error: %s"
                                                          (error-message-string parse-err))
                                         nil)))
                            :sync t
                            :timeout ip-forgejo-api-timeout))
                  (response-data (request-response-data response))
                  (status (request-response-status-code response)))
-            
+
             (if (and (>= status 200) (< status 300))
                 (progn
-                  (ip-forgejo--log 'success "Response: %d bytes" 
+                  (ip-forgejo--log 'success "Response: %d bytes"
                                    (length (prin1-to-string response-data)))
                   (setq result response-data))
               (progn
@@ -265,12 +265,12 @@ MAX-RETRIES is maximum number of retry attempts."
            (ip-forgejo--clear-cache-and-connections)
            (sleep-for delay)
            (setq delay (* delay 2)))))
-      
+
       (setq retries (1- retries)))
-    
+
     (unless result
       (ip-forgejo--log 'error "All retry attempts failed for %s" url))
-    
+
     result))
 
 (defun ip-forgejo--api (url &optional headers)
@@ -316,12 +316,14 @@ HEADERS is optional list of additional HTTP headers."
                       (mapcar
                        (lambda (entry)
                          (let* ((created-str (alist-get 'created entry))
-                                (duration (alist-get 'time entry 0))
+                                (duration (or (alist-get 'time entry) 0))
                                 (ts (and created-str
+                                         (not (string-empty-p created-str))
                                          (condition-case nil
                                              (date-to-time created-str)
                                            (error nil))))
-                                (end-time (and ts (time-add ts (seconds-to-time duration))))
+                                (end-time (and ts (> duration 0)
+                                             (time-add ts (seconds-to-time duration))))
                                 (start-str (and ts (format-time-string "[%Y-%m-%d %a %H:%M]" ts)))
                                 (end-str (and end-time (format-time-string "[%Y-%m-%d %a %H:%M]" end-time)))
                                 (h (/ duration 3600))
@@ -346,7 +348,7 @@ HEADERS is optional list of additional HTTP headers."
                      (author-name (if author (alist-get 'login author) "Unknown"))
                      (created-str (alist-get 'created_at comment))
                      (body (ip-forgejo--clean-body (alist-get 'body comment)))
-                     (timestamp (if created-str
+                     (timestamp (if (and created-str (not (string-empty-p created-str)))
                                     (condition-case nil
                                         (format-time-string "[%Y-%m-%d %a %H:%M]"
                                                             (date-to-time created-str))
@@ -360,17 +362,22 @@ HEADERS is optional list of additional HTTP headers."
 
 (defun ip-forgejo--format-entry (issue times)
   "Format a single ISSUE with TIMES into an Org heading."
-  (let* ((title (alist-get 'title issue))
-         (number (alist-get 'number issue))
-         (state (alist-get 'state issue))
+  (let* ((title (or (alist-get 'title issue) "Untitled Issue"))
+         (number (or (alist-get 'number issue) 0))
+         (state (or (alist-get 'state issue) "open"))
          (todo (ip-forgejo--org-todo-state state))
          (labels (ip-forgejo--ensure-list (alist-get 'labels issue)))
-         (owner-data (alist-get 'owner (alist-get 'repository issue)))
-         (owner-name (if (stringp owner-data) owner-data (alist-get 'login owner-data)))
-         (repo-name (alist-get 'name (alist-get 'repository issue)))
-         (id (alist-get 'id issue))
+         (repo-data (alist-get 'repository issue))
+         (owner-data (alist-get 'owner repo-data))
+         (owner-name (cond
+                      ((stringp owner-data) owner-data)
+                      ((and owner-data (alist-get 'login owner-data))
+                       (alist-get 'login owner-data))
+                      (t "unknown")))
+         (repo-name (or (alist-get 'name repo-data) "unknown"))
+         (id (or (alist-get 'id issue) 0))
          (body (ip-forgejo--clean-body (or (alist-get 'body issue) "")))
-         (total-time (cl-reduce #'+ (mapcar (lambda (e) (alist-get 'time e 0))
+         (total-time (cl-reduce #'+ (mapcar (lambda (e) (or (alist-get 'time e) 0))
                                             (ip-forgejo--ensure-list times))
                                 :initial-value 0))
          (logbook (ip-forgejo--format-logbook times))
@@ -383,28 +390,30 @@ HEADERS is optional list of additional HTTP headers."
          (created (alist-get 'created_at issue))
          (due-date (alist-get 'deadline issue))
          ;; Format tags
-         (label-tags (mapcar (lambda (lbl) 
-                              (replace-regexp-in-string "[^A-Za-z0-9_]+" "_" 
-                                                       (alist-get 'name lbl)))
+         (label-tags (mapcar (lambda (lbl)
+                              (replace-regexp-in-string "[^A-Za-z0-9_]+" "_"
+                                                       (or (alist-get 'name lbl) "")))
                              labels))
          (all-tags (seq-uniq (append label-tags (list owner-name repo-name))))
-         (tags-str (if all-tags 
-                      (concat "    :" (mapconcat 'identity all-tags ":") ":") 
+         (tags-str (if all-tags
+                      (concat "    :" (mapconcat 'identity all-tags ":") ":")
                     ""))
          ;; Format timestamps
-         (scheduled-str (when created 
-                         (format "SCHEDULED: <%s>" 
-                                (ip-forgejo--format-org-timestamp created))))
-         (deadline-str (when due-date 
-                        (format "DEADLINE: <%s>" 
-                               (ip-forgejo--format-org-timestamp due-date))))
+         (scheduled-str (when created
+                         (let ((timestamp (ip-forgejo--format-org-timestamp created)))
+                           (when timestamp
+                             (format "SCHEDULED: <%s>" timestamp)))))
+         (deadline-str (when due-date
+                        (let ((timestamp (ip-forgejo--format-org-timestamp due-date)))
+                          (when timestamp
+                            (format "DEADLINE: <%s>" timestamp)))))
          ;; Build properties
          (properties-str (format ":PROPERTIES:\n:ID: %s\n:FORGEJO_URL: %s\n:STATE: %s\n:REPO: %s\n:TIME: %d\n:ID_ISSUE: %s\n:END:"
                                  org-id issue-url state repo-name total-time id))
          (logbook-block (if (string-empty-p logbook)
                             ""
                           (format ":LOGBOOK:\n%s\n:END:" logbook))))
-    
+
     (format "* %s %s%s\n%s\n%s\n%s\n%s\n\n%s"
             todo title tags-str
             (or scheduled-str "")
@@ -423,35 +432,86 @@ HEADERS is optional list of additional HTTP headers."
       (while (re-search-forward ":FORGEJO_URL:[ \t]+" nil t)
         (let ((url-start (point))
               (url-end (line-end-position)))
-          (when (string-equal (buffer-substring-no-properties url-start url-end) 
+          (when (string-equal (buffer-substring-no-properties url-start url-end)
                              issue-url)
             (org-back-to-heading t)
             (throw 'found (point)))))
       nil)))
 
 (defun ip-forgejo--replace-or-insert-entry (issue-url entry)
-  "Find Org heading by FORGEJO_URL and replace its subtree with ENTRY."
-  (save-excursion
-    (let ((existing-pos (ip-forgejo--find-entry-by-url issue-url)))
-      (if existing-pos
-          ;; Update existing entry
+  "Find Org heading by FORGEJO_URL and replace its subtree with ENTRY.
+This function tries to minimize interference with org-element cache
+by disabling it completely and performing updates in a more controlled manner."
+  ;; Сохраняем текущий буфер и его состояние
+  (with-current-buffer (current-buffer) ; Предполагается, что мы уже в нужном буфере
+    (let ((inhibit-modification-hooks t) ; Отключаем все хуки модификации
+          (inhibit-read-only t)          ; На случай, если буфер защищен
+          (buffer-undo-list t)           ; Отключаем сбор undo информации
+          modified-pos)                  ; Для логгирования
+
+      ;; 1. Принудительно сбрасываем кэш до любых изменений
+      ;; Это пытается убедиться, что кэш пуст и не будет мешать.
+      (org-element-cache-reset 'force) ; 'force может быть более эффективным
+      (setq org-element--cache nil)
+      (setq org-element--cache-sync-timer nil)
+      ;; Дополнительная страховка: убеждаемся, что таймер не запустится
+      (when (timerp org-element--cache-sync-timer)
+        (cancel-timer org-element--cache-sync-timer)
+        (setq org-element--cache-sync-timer nil))
+
+      ;; 2. Находим позицию и выполняем операцию
+      (let ((existing-pos (ip-forgejo--find-entry-by-url issue-url)))
+        (if existing-pos
+            ;; Update existing entry
+            (progn
+              (goto-char existing-pos)
+              (let ((beg (point))
+                    (end (save-excursion
+                           ;; Используем более безопасный способ поиска конца
+                           (condition-case nil
+                               (org-end-of-subtree t t)
+                             (error ; fallback на конец буфера или следующий заголовок
+                              (if (re-search-forward org-heading-regexp nil t)
+                                  (goto-char (match-beginning 0)) ; Начало след. заголовка
+                                (goto-char (point-max))))) ; Конец буфера
+                           (point))))
+                (delete-region beg end)
+                (insert entry "\n") ; Вставляем с новой строки
+                (setq modified-pos beg)
+                (ip-forgejo--log 'debug "Deleted region %d-%d and inserted updated entry for %s" beg end issue-url)))
+          ;; Insert new entry
           (progn
-            (goto-char existing-pos)
-            (let ((beg (point))
-                  (end (save-excursion
-                         (org-end-of-subtree t t)
-                         (point))))
-              (delete-region beg end)
-              (let ((inhibit-modification-hooks t))
-                (insert entry)
-                (insert "\n"))
-              (ip-forgejo--log 'success "Updated existing entry: %s" issue-url)))
-        ;; Insert new entry
-        (goto-char (point-max))
-        (let ((inhibit-modification-hooks t))
-          (insert entry)
-          (insert "\n\n"))
-        (ip-forgejo--log 'success "Inserted new entry: %s" issue-url)))))
+            (goto-char (point-max))
+            ;; Убедимся, что вставка происходит с новой строки
+            (unless (bolp) (insert "\n"))
+            (let ((insert-pos (point)))
+              (insert entry "\n")
+              (setq modified-pos insert-pos))
+            (ip-forgejo--log 'debug "Inserted new entry at %d for %s" modified-pos issue-url))))
+
+      ;; 3. Принудительно перестраиваем кэш после изменений
+      ;; ВАЖНО: Мы больше не вызываем `org-element-cache-reset` здесь напрямую,
+      ;; так как это может вызвать проблемы. Вместо этого мы позволяем Org
+      ;; постепенно перестроить кэш при следующем обращении к нему.
+      ;; Но для полной очистки можно сделать это:
+      ;; (org-element-cache-reset 'force) ; Попробуйте это, если ниже не помогает
+      ;; Альтернатива: ничего не делать, пусть Org сам разберется позже.
+
+      ;; 4. Логируем результат
+      (if (and modified-pos (>= modified-pos (point-min)) (<= modified-pos (point-max)))
+          (ip-forgejo--log 'success "%s entry: %s (at ~%d)"
+                           (if (ip-forgejo--find-entry-by-url issue-url) "Updated existing" "Inserted new")
+                           issue-url modified-pos)
+        (ip-forgejo--log 'warning "Finished processing entry for %s, but position seems invalid" issue-url))
+
+      ;; 5. Даем Org возможность "передохнуть"
+      ;; Иногда помогает, чтобы другие процессы не пытались работать
+      ;; с буфером сразу после изменений.
+      ;; (sit-for 0) ; Можно попробовать, но не всегда необходимо
+      )))
+
+;; Дополнительно: Рассмотрите возможность обернуть вызов этой функции
+;; в `save-current-buffer` или `with-current-buffer` явно, если это не делается выше.
 
 ;;; Issue Synchronization
 
@@ -462,20 +522,22 @@ HEADERS is optional list of additional HTTP headers."
          (token (cdr config))
          ;; Extract info from URL
          (url-parts (split-string issue-url "/" t))
-         (owner (or repo-owner (nth -4 url-parts)))
-         (repo (or repo-name (nth -3 url-parts)))
+         (owner (or repo-owner (nth 2 url-parts)))
+         (repo (or repo-name (nth 3 url-parts)))
          (issue-number (string-to-number (car (last url-parts))))
          (api-url (format "%s/repos/%s/%s/issues/%d" base-url owner repo issue-number))
          (patch-data `((title . ,title)
                        (body . ,body)
                        (state . ,state))))
-    
+
     (unless (and owner repo)
+
       (ip-forgejo--log 'error "Cannot determine repository info from URL %s" issue-url)
       (error "Cannot determine repository info from URL %s" issue-url))
-    
+    (ip-forgejo--log 'info "Url-parts: %s" url-parts)
+    (ip-forgejo--log 'info "Owner: %s, Repositary: %s" owner repo)
     (ip-forgejo--log 'info "Pushing update to issue %s" issue-url)
-    
+
     (request api-url
       :type "PATCH"
       :headers `(("Authorization" . ,(concat "token " token))
@@ -486,10 +548,10 @@ HEADERS is optional list of additional HTTP headers."
                               (ip-forgejo--log 'success "Issue %s updated" issue-url)))
       :error (cl-function (lambda (&key error-thrown &allow-other-keys)
                             (ip-forgejo--log 'error "Failed to update issue %s: %s"
-                                             issue-url error-thrown))))))
+                                             api-url error-thrown))))))
 
 (defun ip-forgejo--push-deadline (issue-url &optional repo-owner repo-name)
-  "Push DEADLINE from current Org entry to Forgejo issue's duedate."
+  "Push DEADLINE from current Org entry to Forgejo issue\='s duedate using ISSUE-URL and optional REPO-OWNER and REPO-NAME."
   (let* ((config (ip-forgejo--current-config))
          (base-url (car config))
          (token (cdr config))
@@ -503,16 +565,16 @@ HEADERS is optional list of additional HTTP headers."
          (deadline-iso8601 (when deadline-str
                              (format-time-string "%FT%T%z"
                                                  (org-time-string-to-time deadline-str)))))
-    
+
     (unless (and owner repo)
       (ip-forgejo--log 'error "Cannot determine repository info from URL %s" issue-url)
       (error "Cannot determine repository info from URL %s" issue-url))
-    
+
     (when deadline-iso8601
       (let ((patch-data `((deadline . ,deadline-iso8601))))
-        (ip-forgejo--log 'info "Pushing deadline to issue %s: %s" 
+        (ip-forgejo--log 'info "Pushing deadline to issue %s: %s"
                          issue-url deadline-iso8601)
-        
+
         (request api-url
           :type "PATCH"
           :headers `(("Authorization" . ,(concat "token " token))
@@ -520,11 +582,11 @@ HEADERS is optional list of additional HTTP headers."
           :data (json-serialize patch-data)
           :sync t
           :success (cl-function (lambda (&key &allow-other-keys)
-                                  (ip-forgejo--log 'success 
-                                                   "Deadline for issue %s updated" 
+                                  (ip-forgejo--log 'success
+                                                   "Deadline for issue %s updated"
                                                    issue-url)))
           :error (cl-function (lambda (&key error-thrown &allow-other-keys)
-                                (ip-forgejo--log 'error 
+                                (ip-forgejo--log 'error
                                                  "Failed to update deadline for issue %s: %s"
                                                  issue-url error-thrown))))))))
 
@@ -540,15 +602,15 @@ TIME-SECONDS is the amount of time in seconds to log."
          (owner (or repo-owner (nth -4 url-parts)))
          (repo (or repo-name (nth -3 url-parts)))
          (issue-number (string-to-number (car (last url-parts))))
-         (api-url (format "%s/repos/%s/%s/issues/%d/times" 
+         (api-url (format "%s/repos/%s/%s/issues/%d/times"
                          base-url owner repo issue-number))
          (post-data `((created . ,(format-time-string "%FT%T%z"))
                      (time . ,time-seconds))))
-    
+
     (unless (and owner repo)
       (ip-forgejo--log 'error "Cannot determine repository info from URL %s" issue-url)
       (error "Cannot determine repository info from URL %s" issue-url))
-    
+
     (request api-url
       :type "POST"
       :headers `(("Authorization" . ,(concat "token " token))
@@ -556,7 +618,7 @@ TIME-SECONDS is the amount of time in seconds to log."
       :data (json-serialize post-data)
       :sync t
       :success (cl-function (lambda (&key &allow-other-keys)
-                              (ip-forgejo--log 'success "Time logged for issue %s" 
+                              (ip-forgejo--log 'success "Time logged for issue %s"
                                                issue-url)))
       :error (cl-function (lambda (&key error-thrown &allow-other-keys)
                             (ip-forgejo--log 'error "Failed to log time for issue %s: %s"
@@ -572,7 +634,7 @@ TIME-SECONDS is the amount of time in seconds to log."
       (org-back-to-heading t)
       (let ((forgejo-url (org-entry-get nil "FORGEJO_URL")))
         (when forgejo-url
-          (ip-debug-log 'info 'forgejo "Auto-syncing deadline for issue %s" 
+          (ip-debug-log 'info 'forgejo "Auto-syncing deadline for issue %s"
                         forgejo-url)
           (ip-forgejo--push-deadline forgejo-url))))))
 
@@ -587,7 +649,7 @@ TIME-SECONDS is the amount of time in seconds to log."
           (completing-read "Switch to instance: " names nil t))
     (when ip-forgejo-auto-clear-cache
       (ip-forgejo--clear-cache-and-connections))
-    (ip-debug-log 'info 'forgejo "Switched to instance: %s" 
+    (ip-debug-log 'info 'forgejo "Switched to instance: %s"
                   ip-forgejo-current-instance)))
 
 ;;;###autoload
@@ -613,7 +675,7 @@ TIME-SECONDS is the amount of time in seconds to log."
           (insert "Cached URLs:\n")
           (maphash (lambda (url entry)
                      (let ((timestamp (plist-get entry :timestamp)))
-                       (insert (format "- %s [%s]\n" url 
+                       (insert (format "- %s [%s]\n" url
                                       (format-time-string "%H:%M:%S" timestamp)))))
                    ip-forgejo--cache)
           (goto-char (point-min))
@@ -637,106 +699,121 @@ TIME-SECONDS is the amount of time in seconds to log."
                  (cl-pushnew client clients :test 'equal)
                  (cl-pushnew (format "%s/%s" client repo) repos :test 'equal)))))))
      "FORGEJO_URL<>\"\"") ; only imported tasks
-    
+
     (with-current-buffer (get-buffer-create "*Forgejo Clients*")
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert "=== Clients (Repository Owners) ===\n\n")
         (dolist (client (seq-sort 'string< clients))
           (insert (format "- %s\n" client)))
-        
+
         (insert "\n=== Repositories ===\n\n")
         (dolist (repo (seq-sort 'string< repos))
           (insert (format "- %s\n" repo)))
-        
-        (insert (format "\nTotal: %d clients, %d repositories\n" 
+
+        (insert (format "\nTotal: %d clients, %d repositories\n"
                         (length clients) (length repos)))
         (goto-char (point-min))
         (display-buffer (current-buffer))))))
 
 ;;;###autoload
 (defun ip-forgejo-import-my-issues (&optional instance)
-  "Import assigned issues from current or specified Forgejo INSTANCE."
+  "Import assigned issues from current or specified Forgejo INSTANCE.
+Imports both open and closed issues."
   (interactive)
   (when instance
     (setq ip-forgejo-current-instance instance))
-  
-  (ip-forgejo--log 'info "Starting import from instance: %s" 
+
+  (ip-forgejo--log 'info "Starting import from instance: %s"
                    ip-forgejo-current-instance)
-  
+
   (let* ((config (ip-forgejo--current-config))
          (base-url (car config))
          (user-url (format "%s/user" base-url))
          (user-data (ip-forgejo--api user-url)))
-    
+
     (unless user-data
       (ip-forgejo--log 'error "Failed to get user information")
       (error "Failed to get user information"))
-    
+
     (let* ((username (alist-get 'login user-data))
-           (issues-url (format "%s/repos/issues/search?assigned=true&state=all" base-url))
-           (issues-data (ip-forgejo--api issues-url)))
-      
-      (unless issues-data
+           ;; Get open issues
+           (open-issues-url (format "%s/repos/issues/search?assigned=true&state=open" base-url))
+           (open-issues-data (ip-forgejo--api open-issues-url))
+           ;; Get closed issues
+           (closed-issues-url (format "%s/repos/issues/search?assigned=true&state=closed" base-url))
+           (closed-issues-data (ip-forgejo--api closed-issues-url))
+           ;; Combine all issues
+           (all-issues (append (ip-forgejo--ensure-list open-issues-data)
+                              (ip-forgejo--ensure-list closed-issues-data)))
+           (total-imported 0)
+           (total-updated 0))
+
+      (unless (or open-issues-data closed-issues-data)
         (ip-forgejo--log 'error "Failed to get issues data")
         (error "Failed to get issues data"))
-      
-      (let ((issues (ip-forgejo--ensure-list issues-data))
-            (total-imported 0)
-            (total-updated 0))
-        
-        (ip-forgejo--log 'info "Found %d issues for user %s" (length issues) username)
-        
-        (dolist (issue issues)
-          (let* ((issue-id (alist-get 'id issue))
-                 (repo-data (alist-get 'repository issue))
-                 (owner-data (alist-get 'owner repo-data))
-                 (owner-name (if (stringp owner-data) 
-                               owner-data 
-                               (alist-get 'login owner-data)))
-                 (repo-name (alist-get 'name repo-data))
-                 (issue-number (alist-get 'number issue))
-                 ;; Get time logs for this issue
-                 (times-url (format "%s/repos/%s/%s/issues/%d/times" 
-                                   base-url owner-name repo-name issue-number))
-                 (times-data (ip-forgejo--api times-url))
-                 (times (ip-forgejo--ensure-list times-data))
-                 ;; Format the entry
-                 (entry (ip-forgejo--format-entry issue times))
-                 ;; Generate issue URL
-                 (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
-                 (issue-url (format "%s/%s/%s/issues/%s" 
-                                   web-url owner-name repo-name issue-number))
-                 ;; Check if entry already exists
-                 (existing-pos (ip-forgejo--find-entry-by-url issue-url)))
-            
-            (ip-forgejo--log 'info "Work with %s (%s)" issue-id web-url)
-            (ip-forgejo--replace-or-insert-entry issue-url entry)
-            
-            (if existing-pos
-                (cl-incf total-updated)
-              (cl-incf total-imported))))
-        
-        (ip-forgejo--log 'success "Import completed: %d new, %d updated" 
-                         total-imported total-updated)
-        
-        ;; Display sync report
-        (with-current-buffer (get-buffer-create ip-forgejo--sync-buffer-name)
-          (goto-char (point-max))
-          (let ((inhibit-read-only t))
-            (insert "\n" (make-string 50 ?=) "\n")
-            (insert (format "IMPORT SUMMARY [%s]\n" 
-                           (format-time-string "%Y-%m-%d %H:%M:%S")))
-            (insert (format "Instance: %s\n" ip-forgejo-current-instance))
-            (insert (format "User: %s\n" username))
-            (insert (format "Total issues processed: %d\n" (length issues)))
-            (insert (format "New entries: %d\n" total-imported))
-            (insert (format "Updated entries: %d\n" total-updated))
-            (insert (make-string 50 ?=) "\n"))
-          (display-buffer (current-buffer)))
-        
-        (message "Forgejo import completed: %d new, %d updated issues" 
-                 total-imported total-updated)))))
+
+      (ip-forgejo--log 'info "Found %d open issues, %d closed issues for user %s"
+                       (length (ip-forgejo--ensure-list open-issues-data))
+                       (length (ip-forgejo--ensure-list closed-issues-data))
+                       username)
+      (ip-forgejo--log 'info "Total issues to process: %d" (length all-issues))
+
+      (dolist (issue all-issues)
+        (let* ((issue-id (alist-get 'id issue))
+               (repo-data (alist-get 'repository issue))
+               (owner-data (alist-get 'owner repo-data))
+               (owner-name (if (stringp owner-data)
+                             owner-data
+                             (alist-get 'login owner-data)))
+               (repo-name (alist-get 'name repo-data))
+               (issue-number (alist-get 'number issue))
+               (state (alist-get 'state issue))
+               ;; Get time logs for this issue
+               (times-url (format "%s/repos/%s/%s/issues/%d/times"
+                                 base-url owner-name repo-name issue-number))
+               (times-data (ip-forgejo--api times-url))
+               (times (ip-forgejo--ensure-list times-data))
+               ;; Format the entry
+               (entry (ip-forgejo--format-entry issue times))
+               ;; Generate issue URL
+               (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
+               (issue-url (format "%s/%s/%s/issues/%s"
+                                 web-url owner-name repo-name issue-number))
+               ;; Check if entry already exists
+               (existing-pos (ip-forgejo--find-entry-by-url issue-url)))
+
+          (ip-forgejo--log 'info "Processing %s issue %s (%s)" state issue-id web-url)
+          (ip-forgejo--replace-or-insert-entry issue-url entry)
+
+          (if existing-pos
+              (cl-incf total-updated)
+            (cl-incf total-imported))))
+
+      (ip-forgejo--log 'success "Import completed: %d new, %d updated (including %d closed issues)"
+                       total-imported total-updated
+                       (length (ip-forgejo--ensure-list closed-issues-data)))
+
+      ;; Display sync report
+      (with-current-buffer (get-buffer-create ip-forgejo--sync-buffer-name)
+        (goto-char (point-max))
+        (let ((inhibit-read-only t))
+          (insert "\n" (make-string 50 ?=) "\n")
+          (insert (format "IMPORT SUMMARY [%s]\n"
+                         (format-time-string "%Y-%m-%d %H:%M:%S")))
+          (insert (format "Instance: %s\n" ip-forgejo-current-instance))
+          (insert (format "User: %s\n" username))
+          (insert (format "Total issues processed: %d\n" (length all-issues)))
+          (insert (format "Open issues: %d\n" (length (ip-forgejo--ensure-list open-issues-data))))
+          (insert (format "Closed issues: %d\n" (length (ip-forgejo--ensure-list closed-issues-data))))
+          (insert (format "New entries: %d\n" total-imported))
+          (insert (format "Updated entries: %d\n" total-updated))
+          (insert (make-string 50 ?=) "\n"))
+        (display-buffer (current-buffer)))
+
+      (message "Forgejo import completed: %d new, %d updated issues (%d closed)"
+               total-imported total-updated
+               (length (ip-forgejo--ensure-list closed-issues-data))))))
 
 ;;;###autoload
 (defun ip-forgejo-push-current-entry ()
@@ -754,11 +831,11 @@ TIME-SECONDS is the amount of time in seconds to log."
                                        (org-end-of-subtree t)
                                        (point))))
                     (buffer-substring-no-properties content-start content-end)))))
-      
+
       (unless forgejo-url
         (ip-forgejo--log 'error "Current entry is not a Forgejo issue")
         (error "Current entry is not a Forgejo issue"))
-      
+
       (let ((forgejo-state (ip-forgejo--forgejo-state todo-state)))
         (ip-forgejo--push-issue forgejo-url title body forgejo-state)
         (ip-forgejo--push-deadline forgejo-url)
@@ -774,9 +851,9 @@ TIME-SECONDS is the amount of time in seconds to log."
       (unless forgejo-url
         (ip-forgejo--log 'error "Current entry is not a Forgejo issue")
         (error "Current entry is not a Forgejo issue"))
-      
+
       (org-clock-in)
-      
+
       ;; Add advice to org-clock-out to log time to Forgejo
       (advice-add 'org-clock-out :after
                   (lambda ()
@@ -784,7 +861,7 @@ TIME-SECONDS is the amount of time in seconds to log."
                                (boundp 'org-clock-start-time)
                                org-clock-start-time)
                       (let* ((end-time (current-time))
-                             (duration (time-to-seconds 
+                             (duration (time-to-seconds
                                        (time-subtract end-time org-clock-start-time)))
                              (issue-url (org-entry-get nil "FORGEJO_URL")))
                         (when (> duration 60) ; Only log if more than 1 minute
@@ -807,11 +884,11 @@ TIME-SECONDS is the amount of time in seconds to log."
   (save-excursion
     (org-back-to-heading t)
     (let ((forgejo-url (org-entry-get nil "FORGEJO_URL")))
-      
+
       (unless forgejo-url
         (ip-forgejo--log 'error "Current entry is not a Forgejo issue")
         (error "Current entry is not a Forgejo issue"))
-      
+
       ;; Extract repository info from URL
       (let* ((url-parts (split-string forgejo-url "/" t))
              (owner (nth -4 url-parts))
@@ -820,24 +897,24 @@ TIME-SECONDS is the amount of time in seconds to log."
              (config (ip-forgejo--current-config))
              (base-url (car config))
              ;; API URLs
-             (issue-api-url (format "%s/repos/%s/%s/issues/%s" 
+             (issue-api-url (format "%s/repos/%s/%s/issues/%s"
                                    base-url owner repo issue-number))
-             (times-api-url (format "%s/repos/%s/%s/issues/%s/times" 
+             (times-api-url (format "%s/repos/%s/%s/issues/%s/times"
                                    base-url owner repo issue-number)))
-        
+
         ;; Clear cache for this issue
         (remhash issue-api-url ip-forgejo--cache)
         (remhash times-api-url ip-forgejo--cache)
-        
+
         ;; Fetch fresh data
         (let* ((issue-data (ip-forgejo--api issue-api-url))
                (times-data (ip-forgejo--api times-api-url))
                (times (ip-forgejo--ensure-list times-data)))
-          
+
           (unless issue-data
             (ip-forgejo--log 'error "Failed to refresh issue data")
             (error "Failed to refresh issue data"))
-          
+
           ;; Update the entry
           (let ((entry (ip-forgejo--format-entry issue-data times)))
             (ip-forgejo--replace-or-insert-entry forgejo-url entry)
@@ -846,45 +923,45 @@ TIME-SECONDS is the amount of time in seconds to log."
 
 ;;; Repository and Issue Search
 
-;;;###autoload  
+;;;###autoload
 (defun ip-forgejo-search-issues (query)
   "Search for issues across all repositories using QUERY."
   (interactive "sSearch query: ")
   (let* ((config (ip-forgejo--current-config))
          (base-url (car config))
-         (search-url (format "%s/repos/issues/search?q=%s&state=all" 
+         (search-url (format "%s/repos/issues/search?q=%s&state=all"
                             base-url (url-hexify-string query)))
          (results (ip-forgejo--api search-url)))
-    
+
     (unless results
       (ip-forgejo--log 'error "Search failed for query: %s" query)
       (error "Search failed"))
-    
+
     (let ((issues (ip-forgejo--ensure-list results)))
       (with-current-buffer (get-buffer-create "*Forgejo Search Results*")
         (let ((inhibit-read-only t))
           (erase-buffer)
           (insert (format "=== Search Results for: %s ===\n\n" query))
           (insert (format "Found %d issues:\n\n" (length issues)))
-          
+
           (dolist (issue issues)
             (let* ((title (alist-get 'title issue))
                    (number (alist-get 'number issue))
                    (state (alist-get 'state issue))
                    (repo-data (alist-get 'repository issue))
                    (owner-data (alist-get 'owner repo-data))
-                   (owner-name (if (stringp owner-data) 
-                                 owner-data 
+                   (owner-name (if (stringp owner-data)
+                                 owner-data
                                  (alist-get 'login owner-data)))
                    (repo-name (alist-get 'name repo-data))
                    (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
-                   (issue-url (format "%s/%s/%s/issues/%s" 
+                   (issue-url (format "%s/%s/%s/issues/%s"
                                      web-url owner-name repo-name number)))
-              
-              (insert (format "- [%s] %s/%s#%d: %s\n  %s\n\n" 
-                             (upcase state) owner-name repo-name number 
+
+              (insert (format "- [%s] %s/%s#%d: %s\n  %s\n\n"
+                             (upcase state) owner-name repo-name number
                              title issue-url))))
-          
+
           (goto-char (point-min))
           (display-buffer (current-buffer)))))))
 
@@ -895,13 +972,13 @@ TIME-SECONDS is the amount of time in seconds to log."
   "Setup Forgejo integration hooks and keybindings."
   (interactive)
   ;; Add save hook for automatic deadline sync
-  (add-hook 'org-mode-hook 
+  (add-hook 'org-mode-hook
             (lambda ()
               (add-hook 'after-save-hook 'ip-forgejo--on-save-hook nil t)))
-  
+
   ;; Remove the auto-log advice when disabling
   (advice-remove 'org-clock-out '((name . ip-forgejo-auto-log)))
-  
+
   (ip-debug-log 'info 'forgejo "Forgejo integration setup completed"))
 
 ;;;###autoload
@@ -909,16 +986,16 @@ TIME-SECONDS is the amount of time in seconds to log."
   "Remove Forgejo integration hooks and clean up."
   (interactive)
   ;; Remove hooks
-  (remove-hook 'org-mode-hook 
+  (remove-hook 'org-mode-hook
                (lambda ()
                  (remove-hook 'after-save-hook 'ip-forgejo--on-save-hook t)))
-  
+
   ;; Remove advice
   (advice-remove 'org-clock-out '((name . ip-forgejo-auto-log)))
-  
+
   ;; Clear cache
   (ip-forgejo--clear-cache-and-connections)
-  
+
   (ip-debug-log 'info 'forgejo "Forgejo integration teardown completed"))
 
 ;;; Minor Mode
