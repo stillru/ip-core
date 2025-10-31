@@ -981,16 +981,23 @@ Imports both open and closed issues."
 
 ;;;###autoload
 (defun ip-forgejo-test-connection ()
-  "Test connection to current Forgejo instance."
+  "Test connection to current Forgejo instance with detailed debugging."
   (interactive)
   (let* ((config (ip-forgejo--current-config))
          (base-url (car config))
+         (token (cdr config))
          (user-url (format "%s/user" base-url)))
-    (message "Testing connection to %s..." base-url)
-    (let ((result (ip-forgejo--api user-url)))
-      (if result
-          (message "✓ Connection successful! User: %s" (alist-get 'login result))
-        (message "✗ Connection failed!")))))
+    
+    (message "Testing connection to: %s" base-url)
+    (message "Token: %s..." (if token (substring token 0 8) "MISSING"))
+    
+    (condition-case err
+        (let ((result (ip-forgejo--api user-url)))
+          (if result
+              (message "✓ Connection successful! User: %s" (alist-get 'login result))
+            (message "✗ Connection failed - no data returned")))
+      (error 
+       (message "✗ Connection error: %s" (error-message-string err))))))
 
 ;;; Provide
 
