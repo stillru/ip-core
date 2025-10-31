@@ -268,55 +268,49 @@
 
     (while (and (> retries 0) (not result))
       (condition-case err
-          (let ((response
-                 (request url
-                  :type "GET"
-                  :headers all-headers
-                  :parser (lambda ()
-                            (condition-case parse-err
-                                (json-parse-string (buffer-string)
-                                                   :object-type 'alist
-                                                   :array-type 'list
-                                                   :null-object nil
-                                                   :false-object :false)
-                              (error
-                               (ip-forgejo--log 'error "JSON parse error: %s"
-                                                (error-message-string parse-err))
-                               nil)))
-                  :sync t
-                  :timeout ip-forgejo-api-timeout
-                  :status-code 'success
-                  :error (cl-function 
-                          (lambda (&key error-thrown &allow-other-keys)
-                            (ip-forgejo--log 'error "Request error: %s" error-thrown)))
-                  :complete (lambda (&rest _)
-                              ;; Force cleanup
-                              (when (and (boundp 'url-http-connection-cache) 
-                                         url-http-connection-cache)
-                                (setq url-http-connection-cache nil))))))
-            (let ((response-data (request-response-data response))
-                  (status (request-response-status-code response)))
-              
-              (cond
-               ((and (>= status 200) (< status 300))
-                (ip-forgejo--log 'success "Response: %d bytes"
-                                 (length (prin1-to-string response-data)))
-                (setq result response-data))
-               
-               ((= status 401)
-                (ip-forgejo--log 'error "HTTP 401 Unauthorized - check token")
-                (setq retries 0))  ;; Don't retry auth errors
-               
-               ((= status 404)
-                (ip-forgejo--log 'error "HTTP 404 Not Found - check URL: %s" url)
-                (setq retries 0))  ;; Don't retry 404 errors
-               
-               (t
-                (ip-forgejo--log 'error "HTTP %d for %s" status url)
+          (let (response-success response-data response-status)
+            (request url
+              :type "GET"
+              :headers all-headers
+              :parser (lambda ()
+                        (condition-case parse-err
+                            (json-parse-string (buffer-string)
+                                               :object-type 'alist
+                                               :array-type 'list
+                                               :null-object nil
+                                               :false-object :false)
+                          (error
+                           (ip-forgejo--log 'error "JSON parse error: %s"
+                                            (error-message-string parse-err))
+                           nil)))
+              :sync t
+              :timeout ip-forgejo-api-timeout
+              :success (cl-function 
+                        (lambda (&key data &allow-other-keys)
+                          (setq response-success t
+                                response-data data)))
+              :error (cl-function 
+                      (lambda (&key error-thrown &allow-other-keys)
+                        (ip-forgejo--log 'error "Request error: %s" error-thrown)
+                        (setq response-success nil)))
+              :complete (lambda (&rest _)
+                          ;; Force cleanup
+                          (when (and (boundp 'url-http-connection-cache) 
+                                     url-http-connection-cache)
+                            (setq url-http-connection-cache nil))))
+            
+            ;; Process response
+            (if response-success
+                (progn
+                  (ip-forgejo--log 'success "Response: %d bytes"
+                                   (length (prin1-to-string response-data)))
+                  (setq result response-data))
+              (progn
+                (ip-forgejo--log 'error "Request failed for %s" url)
                 (when (> retries 1)
                   (ip-forgejo--log 'warning "Retrying in %d seconds..." delay)
                   (sit-for delay)
-                  (setq delay (* delay 2)))))))
+                  (setq delay (* delay 2))))))
         
         (error
          (ip-forgejo--log 'error "Request failed: %s" (error-message-string err))
@@ -334,6 +328,38 @@
     result))
 
 
+(defun ip-forgejo--api-simple (url &optional headers)
+  "Simple API request using url-retrieve for better reliability."
+  (let* ((config (ip-forgejo--current-config))
+         (token (cdr config))
+         (url-request-extra-headers `(("Authorization" . ,(concat "token " token))))
+         (url-request-method "GET")
+         result)
+    
+    (ip-forgejo--log 'info "Simple request: GET %s" url)
+    
+    (condition-case err
+        (with-current-buffer (url-retrieve-synchronously url t t)
+          (goto-char (point-min))
+          (when (re-search-forward "^$" nil t)
+            (let ((json-data (buffer-substring (point) (point-max))))
+              (when (and json-data (> (length json-data) 0))
+                (setq result (json-parse-string json-data
+                                                :object-type 'alist
+                                                :array-type 'list
+                                                :null-object nil
+                                                :false-object :false))))))
+      (error
+       (ip-forgejo--log 'error "Simple request failed: %s" (error-message-string err))))
+    
+    (if result
+        (progn
+          (ip-forgejo--log 'success "Simple response: %d bytes"
+                           (length (prin1-to-string result)))
+          result)
+      (ip-forgejo--log 'error "Simple request returned no data for %s" url))))
+
+;;; Updated API function with fallback
 
 (defun ip-forgejo--api (url &optional headers)
   "Send GET request to Forgejo API at URL with caching and error handling."
@@ -344,6 +370,11 @@
           (ip-forgejo--log 'info "Cache hit: %s" url)
           cached)
       (let ((result (ip-forgejo--api-request url headers)))
+        ;; If request library fails, try simple version
+        (unless result
+          (ip-forgejo--log 'warning "Falling back to simple request for %s" url)
+          (setq result (ip-forgejo--api-simple url headers)))
+        
         (when (and result (string-match-p "/issues" url))
           (ip-forgejo--cache-put url result))
         result))))
@@ -987,6 +1018,25 @@ Imports both open and closed issues."
 ;;; Debugging function
 
 ;;;###autoload
+(defun ip-forgejo-test-import-small ()
+  "Test import with just one issue to verify functionality."
+  (interactive)
+  (let* ((config (ip-forgejo--current-config))
+         (base-url (car config))
+         (test-url (format "%s/repos/issues/search?state=open&limit=1" base-url))
+         (test-data (ip-forgejo--api test-url)))
+    
+    (if test-data
+        (progn
+          (message "✓ Test successful - found %d issues" 
+                   (length (ip-forgejo--ensure-list test-data)))
+          (dolist (issue (ip-forgejo--ensure-list test-data))
+            (message "Issue: #%s %s" 
+                     (alist-get 'number issue)
+                     (alist-get 'title issue))))
+      (message "✗ Test failed - no issues found"))))
+
+;;;###autoload
 (defun ip-forgejo-test-connection ()
   "Test connection to current Forgejo instance with detailed debugging."
   (interactive)
@@ -1044,7 +1094,12 @@ Imports both open and closed issues."
         (condition-case err
             (let ((result (ip-forgejo--api url)))
               (if result
-                  (message "  ✓ Success")
+                  (progn
+                    (message "  ✓ Success")
+                    (when (string-equal description "User API")
+                      (message "    User: %s" (or (alist-get 'login result) "unknown")))
+                    (when (string-equal description "Version API")
+                      (message "    Version: %s" (or (alist-get 'version result) "unknown"))))
                 (message "  ✗ Failed - no data")))
           (error
            (message "  ✗ Error: %s" (error-message-string err))))))))
