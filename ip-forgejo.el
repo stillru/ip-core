@@ -256,57 +256,74 @@
          (all-headers (cons auth-header (or headers '())))
          (retries (or max-retries ip-forgejo-max-retries))
          (delay 1)
-         result)
+         result
+         (request-backend 'sync))  ;; Force sync backend to avoid curl issues
 
-    (ip-forgejo--log 'info "Request: GET %s (retries: %d)" url retries)
+  (ip-forgejo--log 'info "Request: GET %s (retries: %d)" url retries)
 
-    (while (and (> retries 0) (not result))
-      (condition-case err
-          (let* ((response
-                  (request url
-                           :type "GET"
-                           :headers all-headers
-                           :parser (lambda ()
-                                     (condition-case parse-err
-                                         (json-parse-string (buffer-string)
-                                                            :object-type 'alist
-                                                            :array-type 'list
-                                                            :null-object nil
-                                                            :false-object :false)
-                                       (error
-                                        (ip-forgejo--log 'error "JSON parse error: %s"
-                                                         (error-message-string parse-err))
-                                        nil)))
-                           :sync t
-                           :timeout ip-forgejo-api-timeout))
-                 (response-data (request-response-data response))
-                 (status (request-response-status-code response)))
+  (while (and (> retries 0) (not result))
+    (condition-case err
+        (progn
+          ;; Process events to prevent Emacs hanging
+          (while-no-input
+            (let ((response
+                   (request url
+                    :type "GET"
+                    :headers all-headers
+                    :parser (lambda ()
+                              (condition-case parse-err
+                                  (json-parse-string (buffer-string)
+                                                     :object-type 'alist
+                                                     :array-type 'list
+                                                     :null-object nil
+                                                     :false-object :false)
+                                (error
+                                 (ip-forgejo--log 'error "JSON parse error: %s"
+                                                  (error-message-string parse-err))
+                                 nil)))
+                    :sync t
+                    :timeout ip-forgejo-api-timeout
+                    :status-code 'success
+                    :error (cl-function 
+                            (lambda (&key error-thrown &allow-other-keys)
+                              (ip-forgejo--log 'error "Request error: %s" error-thrown)))
+                    :complete (lambda (&rest _)
+                                ;; Force cleanup
+                                (setq url-http-connection-cache nil)))))
+              (let ((response-data (request-response-data response))
+                    (status (request-response-status-code response)))
+                
+                (if (and (>= status 200) (< status 300))
+                    (progn
+                      (ip-forgejo--log 'success "Response: %d bytes"
+                                       (length (prin1-to-string response-data)))
+                      (setq result response-data))
+                  (progn
+                    (ip-forgejo--log 'error "HTTP %d for %s" status url)
+                    (when (> retries 1)
+                      (ip-forgejo--log 'warning "Retrying in %d seconds..." delay)
+                      (sit-for delay)  ;; Use sit-for instead of sleep-for
+                      (setq delay (* delay 2))))))))
+          ;; If while-no-input was aborted, handle it
+          (when (null result)
+            (ip-forgejo--log 'warning "Request aborted by user input")
+            (setq retries 0)))
+      
+      (error
+       (ip-forgejo--log 'error "Request failed: %s" (error-message-string err))
+       (when (> retries 1)
+         (ip-forgejo--log 'warning "Clearing connections and retrying...")
+         (ip-forgejo--clear-cache-and-connections)
+         (sit-for delay)  ;; Use sit-for instead of sleep-for
+         (setq delay (* delay 2)))))
 
-            (if (and (>= status 200) (< status 300))
-                (progn
-                  (ip-forgejo--log 'success "Response: %d bytes"
-                                   (length (prin1-to-string response-data)))
-                  (setq result response-data))
-              (progn
-                (ip-forgejo--log 'error "HTTP %d for %s" status url)
-                (when (> retries 1)
-                  (ip-forgejo--log 'warning "Retrying in %d seconds..." delay)
-                  (sleep-for delay)
-                  (setq delay (* delay 2))))))
-        (error
-         (ip-forgejo--log 'error "Request failed: %s" (error-message-string err))
-         (when (> retries 1)
-           (ip-forgejo--log 'warning "Clearing connections and retrying...")
-           (ip-forgejo--clear-cache-and-connections)
-           (sleep-for delay)
-           (setq delay (* delay 2)))))
+    (setq retries (1- retries)))
 
-      (setq retries (1- retries)))
+  (unless result
+    (ip-forgejo--log 'error "All retry attempts failed for %s" url))
 
-    (unless result
-      (ip-forgejo--log 'error "All retry attempts failed for %s" url))
+  result))
 
-    result))
 
 (defun ip-forgejo--api (url &optional headers)
   "Send GET request to Forgejo API at URL with caching and error handling."
@@ -674,6 +691,9 @@ Imports both open and closed issues."
   (ip-forgejo--log 'info "Starting import from instance: %s"
                    ip-forgejo-current-instance)
 
+  ;; Clear cache before starting
+  (ip-forgejo--clear-cache-and-connections)
+
   (let* ((config (ip-forgejo--current-config))
          (base-url (car config))
          (user-url (format "%s/user" base-url))
@@ -687,57 +707,81 @@ Imports both open and closed issues."
            ;; Get both open and closed issues
            (open-issues-url (format "%s/repos/issues/search?assigned=true&state=open" base-url))
            (closed-issues-url (format "%s/repos/issues/search?assigned=true&state=closed" base-url))
-           (open-issues-data (ip-forgejo--api open-issues-url))
-           (closed-issues-data (ip-forgejo--api closed-issues-url))
-           ;; Combine all issues
-           (all-issues (append (ip-forgejo--ensure-list open-issues-data)
-                              (ip-forgejo--ensure-list closed-issues-data)))
+           (all-issues '())
            (total-imported 0)
            (total-updated 0))
 
-      (unless (or open-issues-data closed-issues-data)
+      ;; Fetch open issues with progress
+      (ip-forgejo--log 'info "Fetching open issues...")
+      (let ((open-issues-data (ip-forgejo--api open-issues-url)))
+        (when open-issues-data
+          (setq all-issues (append all-issues (ip-forgejo--ensure-list open-issues-data)))
+          (ip-forgejo--log 'info "Found %d open issues" 
+                           (length (ip-forgejo--ensure-list open-issues-data))))
+        ;; Process pending events
+        (sit-for 0.01))
+
+      ;; Fetch closed issues with progress  
+      (ip-forgejo--log 'info "Fetching closed issues...")
+      (let ((closed-issues-data (ip-forgejo--api closed-issues-url)))
+        (when closed-issues-data
+          (setq all-issues (append all-issues (ip-forgejo--ensure-list closed-issues-data)))
+          (ip-forgejo--log 'info "Found %d closed issues"
+                           (length (ip-forgejo--ensure-list closed-issues-data))))
+        (sit-for 0.01))
+
+      (unless all-issues
         (ip-forgejo--log 'error "Failed to get issues data")
         (error "Failed to get issues data"))
 
-      (ip-forgejo--log 'info "Found %d open issues, %d closed issues for user %s"
-                       (length (ip-forgejo--ensure-list open-issues-data))
-                       (length (ip-forgejo--ensure-list closed-issues-data))
-                       username)
+      (ip-forgejo--log 'info "Processing %d total issues for user %s"
+                       (length all-issues) username)
 
+      ;; Process each issue with progress
       (dolist (issue all-issues)
         (let* ((issue-id (alist-get 'id issue))
                (repo-data (alist-get 'repository issue))
                (owner-data (alist-get 'owner repo-data))
                (owner-name (if (stringp owner-data)
-                             owner-data
+                               owner-data
                              (alist-get 'login owner-data)))
                (repo-name (alist-get 'name repo-data))
                (issue-number (alist-get 'number issue))
                (state (alist-get 'state issue))
-               ;; Get time logs for this issue
-               (times-url (format "%s/repos/%s/%s/issues/%d/times"
-                                 base-url owner-name repo-name issue-number))
-               (times-data (ip-forgejo--api times-url))
-               (times (ip-forgejo--ensure-list times-data))
-               ;; Format the entry
-               (entry (ip-forgejo--format-entry issue times))
-               ;; Generate issue URL
+               ;; Generate issue URL first
                (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
                (issue-url (format "%s/%s/%s/issues/%s"
-                                 web-url owner-name repo-name issue-number))
-               ;; Check if entry already exists
-               (existing-pos (ip-forgejo--find-entry-by-url issue-url)))
+                                  web-url owner-name repo-name issue-number)))
 
           (ip-forgejo--log 'info "Processing %s issue %s" state issue-id)
-          (ip-forgejo--replace-or-insert-entry issue-url entry)
 
-          (if existing-pos
-              (cl-incf total-updated)
-            (cl-incf total-imported))))
+          ;; Only fetch times for existing entries to reduce API calls
+          (let* ((existing-pos (ip-forgejo--find-entry-by-url issue-url))
+                 (times-url (when existing-pos
+                              (format "%s/repos/%s/%s/issues/%d/times"
+                                      base-url owner-name repo-name issue-number)))
+                 (times-data (when times-url (ip-forgejo--api times-url)))
+                 (times (ip-forgejo--ensure-list times-data))
+                 ;; Format the entry
+                 (entry (ip-forgejo--format-entry issue times)))
 
-      (ip-forgejo--log 'success "Import completed: %d new, %d updated (including %d closed issues)"
-                       total-imported total-updated
-                       (length (ip-forgejo--ensure-list closed-issues-data)))
+            (ip-forgejo--replace-or-insert-entry issue-url entry)
+
+            (if existing-pos
+                (cl-incf total-updated)
+              (cl-incf total-imported)))
+
+          ;; Process events and show progress periodically
+          (when (= (% (cl-incf total-processed) 5) 0)
+            (message "Forgejo import progress: %d/%d issues processed..." 
+                     total-processed (length all-issues))
+            (sit-for 0.001))  ;; Allow event processing
+
+          ;; Small delay to prevent overwhelming the server
+          (sit-for 0.05)))
+
+      (ip-forgejo--log 'success "Import completed: %d new, %d updated"
+                       total-imported total-updated)
 
       ;; Display sync report
       (with-current-buffer (get-buffer-create ip-forgejo--sync-buffer-name)
@@ -745,20 +789,17 @@ Imports both open and closed issues."
         (let ((inhibit-read-only t))
           (insert "\n" (make-string 50 ?=) "\n")
           (insert (format "IMPORT SUMMARY [%s]\n"
-                         (format-time-string "%Y-%m-%d %H:%M:%S")))
+                          (format-time-string "%Y-%m-%d %H:%M:%S")))
           (insert (format "Instance: %s\n" ip-forgejo-current-instance))
           (insert (format "User: %s\n" username))
           (insert (format "Total issues processed: %d\n" (length all-issues)))
-          (insert (format "Open issues: %d\n" (length (ip-forgejo--ensure-list open-issues-data))))
-          (insert (format "Closed issues: %d\n" (length (ip-forgejo--ensure-list closed-issues-data))))
           (insert (format "New entries: %d\n" total-imported))
           (insert (format "Updated entries: %d\n" total-updated))
           (insert (make-string 50 ?=) "\n"))
         (display-buffer (current-buffer)))
 
-      (message "Forgejo import completed: %d new, %d updated issues (%d closed)"
-               total-imported total-updated
-               (length (ip-forgejo--ensure-list closed-issues-data))))))
+      (message "Forgejo import completed: %d new, %d updated issues"
+               total-imported total-updated))))
 
 ;;;###autoload
 (defun ip-forgejo-push-current-entry ()
@@ -910,6 +951,37 @@ Imports both open and closed issues."
   (if ip-forgejo-mode
       (ip-forgejo-setup)
     (ip-forgejo-teardown)))
+
+;;; Emergency recovery function
+
+;;;###autoload
+(defun ip-forgejo-abort-operation ()
+  "Emergency function to abort any hanging Forgejo operations."
+  (interactive)
+  (ip-forgejo--clear-cache-and-connections)
+  (setq url-http-connection-cache nil)
+  (when (boundp 'request--curl-cookie-jar)
+    (setq request--curl-cookie-jar nil))
+  (cancel-function-timers 'ip-forgejo--api-request)
+  (message "Forgejo operations aborted and cache cleared"))
+
+;;; Add keybinding for emergency abort
+(define-key ip-forgejo-mode-map (kbd "C-c f a") 'ip-forgejo-abort-operation)
+
+;;; Debugging function
+
+;;;###autoload
+(defun ip-forgejo-test-connection ()
+  "Test connection to current Forgejo instance."
+  (interactive)
+  (let* ((config (ip-forgejo--current-config))
+         (base-url (car config))
+         (user-url (format "%s/user" base-url)))
+    (message "Testing connection to %s..." base-url)
+    (let ((result (ip-forgejo--api user-url)))
+      (if result
+          (message "✓ Connection successful! User: %s" (alist-get 'login result))
+        (message "✗ Connection failed!")))))
 
 ;;; Provide
 
