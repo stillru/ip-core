@@ -186,7 +186,7 @@
             (when (re-search-forward ":FORGEJO_URL:[ \t]+\\([^\n]+\\)" end t)
               (setq url (string-trim (match-string 1)))))))
       
-      (ip-forgejo--log 'debug "Found FORGEJO_URL: %s" url)
+      ;; Remove debug logging from this function to avoid recursion
       url)))
 
 (defun ip-forgejo--find-entry-by-url (issue-url)
@@ -199,11 +199,12 @@
           (goto-char heading-start)
           (let ((current-url (ip-forgejo--get-forgejo-url-from-current-entry)))
             (when (and current-url (string-equal current-url issue-url))
-              (ip-forgejo--log 'debug "Found existing entry for %s at position %d" 
-                               issue-url heading-start)
+              ;; Move debug logging here with limited frequency
+              (when (random 10) ; Only log 10% of finds to avoid spam
+                (ip-forgejo--log 'debug "Found existing entry for %s at position %d" 
+                                 issue-url heading-start))
               (throw 'found heading-start))))))
-      (ip-forgejo--log 'debug "No existing entry found for %s" issue-url)
-      nil))
+    nil))
 
 ;;; Cache Management
 
@@ -801,23 +802,21 @@ Imports both open and closed issues."
            (total-updated 0)
            (total-processed 0))
 
-      ;; Fetch open issues with progress
+      ;; Fetch open issues
       (ip-forgejo--log 'info "Fetching open issues...")
       (let ((open-issues-data (ip-forgejo--api open-issues-url)))
         (when open-issues-data
           (setq all-issues (append all-issues (ip-forgejo--ensure-list open-issues-data)))
           (ip-forgejo--log 'info "Found %d open issues" 
-                           (length (ip-forgejo--ensure-list open-issues-data))))
-        (sit-for 0.01))
+                           (length (ip-forgejo--ensure-list open-issues-data)))))
 
-      ;; Fetch closed issues with progress  
+      ;; Fetch closed issues  
       (ip-forgejo--log 'info "Fetching closed issues...")
       (let ((closed-issues-data (ip-forgejo--api closed-issues-url)))
         (when closed-issues-data
           (setq all-issues (append all-issues (ip-forgejo--ensure-list closed-issues-data)))
           (ip-forgejo--log 'info "Found %d closed issues"
-                           (length (ip-forgejo--ensure-list closed-issues-data))))
-        (sit-for 0.01))
+                           (length (ip-forgejo--ensure-list closed-issues-data)))))
 
       (unless all-issues
         (ip-forgejo--log 'error "Failed to get issues data")
@@ -831,7 +830,7 @@ Imports both open and closed issues."
         (save-restriction
           (widen)
           
-          ;; Process each issue with progress
+          ;; Process each issue
           (dolist (issue all-issues)
             (let* ((issue-id (alist-get 'id issue))
                    (repo-data (alist-get 'repository issue))
@@ -864,15 +863,10 @@ Imports both open and closed issues."
                     (cl-incf total-updated)
                   (cl-incf total-imported)))
 
-              ;; Process events and show progress periodically
+              ;; Show progress
               (cl-incf total-processed)
               (when (= (% total-processed 5) 0)
-                (message "Forgejo import progress: %d/%d issues processed..." 
-                         total-processed (length all-issues))
-                (sit-for 0.001))
-
-              ;; Small delay to prevent overwhelming the server
-              (sit-for 0.05)))))
+                (message "Forgejo import: %d/%d" total-processed (length all-issues))))))
 
       (ip-forgejo--log 'success "Import completed: %d new, %d updated"
                        total-imported total-updated)
@@ -899,7 +893,8 @@ Imports both open and closed issues."
         (display-buffer (current-buffer)))
 
       (message "Forgejo import completed: %d new, %d updated issues in %s"
-               total-imported total-updated (buffer-name)))))
+               total-imported total-updated (buffer-name))))))
+
 
 ;;;###autoload
 (defun ip-forgejo-push-current-entry ()
@@ -1053,6 +1048,18 @@ Imports both open and closed issues."
     (ip-forgejo-teardown)))
 
 ;;; Emergency recovery function
+
+;;;###autoload
+(defun ip-forgejo-cleanup-debug-buffers ()
+  "Clean up debug buffers that might be filled with spam."
+  (interactive)
+  (when (get-buffer "*IP Debug Forgejo*")
+    (kill-buffer "*IP Debug Forgejo*"))
+  (when (get-buffer "*IP Debug Log*")
+    (kill-buffer "*IP Debug Log*"))
+  (when (get-buffer "*Forgejo Sync Report*")
+    (kill-buffer "*Forgejo Sync Report*"))
+  (message "Debug buffers cleaned up"))
 
 ;;;###autoload
 (defun ip-forgejo-abort-operation ()
