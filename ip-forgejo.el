@@ -256,67 +256,74 @@
          (all-headers (cons auth-header (or headers '())))
          (retries (or max-retries ip-forgejo-max-retries))
          (delay 1)
-         result
-         (request-backend 'sync))  ;; Force sync backend to avoid curl issues
+         result)
+
+    ;; Validate configuration
+    (unless token
+      (ip-forgejo--log 'error "No API token configured for instance: %s" 
+                       ip-forgejo-current-instance)
+      (error "No API token configured for instance: %s" ip-forgejo-current-instance))
 
     (ip-forgejo--log 'info "Request: GET %s (retries: %d)" url retries)
 
     (while (and (> retries 0) (not result))
       (condition-case err
-          (progn
-            ;; Process events to prevent Emacs hanging
-            (while-no-input
-              (let ((response
-                     (request url
-                      :type "GET"
-                      :headers all-headers
-                      :parser (lambda ()
-                                (condition-case parse-err
-                                    (json-parse-string (buffer-string)
-                                                       :object-type 'alist
-                                                       :array-type 'list
-                                                       :null-object nil
-                                                       :false-object :false)
-                                  (error
-                                   (ip-forgejo--log 'error "JSON parse error: %s"
-                                                    (error-message-string parse-err))
-                                   nil)))
-                      :sync t
-                      :timeout ip-forgejo-api-timeout
-                      :status-code 'success
-                      :error (cl-function 
-                              (lambda (&key error-thrown &allow-other-keys)
-                                (ip-forgejo--log 'error "Request error: %s" error-thrown)))
-                      :complete (lambda (&rest _)
-                                  ;; Force cleanup
-                                  (when (and (boundp 'url-http-connection-cache) 
-                                             url-http-connection-cache)
-                                    (setq url-http-connection-cache nil))))))
-                (let ((response-data (request-response-data response))
-                      (status (request-response-status-code response)))
-                  
-                  (if (and (>= status 200) (< status 300))
-                      (progn
-                        (ip-forgejo--log 'success "Response: %d bytes"
-                                         (length (prin1-to-string response-data)))
-                        (setq result response-data))
-                    (progn
-                      (ip-forgejo--log 'error "HTTP %d for %s" status url)
-                      (when (> retries 1)
-                        (ip-forgejo--log 'warning "Retrying in %d seconds..." delay)
-                        (sit-for delay)  ;; Use sit-for instead of sleep-for
-                        (setq delay (* delay 2))))))))
-            ;; If while-no-input was aborted, handle it
-            (when (null result)
-              (ip-forgejo--log 'warning "Request aborted by user input")
-              (setq retries 0)))
+          (let ((response
+                 (request url
+                  :type "GET"
+                  :headers all-headers
+                  :parser (lambda ()
+                            (condition-case parse-err
+                                (json-parse-string (buffer-string)
+                                                   :object-type 'alist
+                                                   :array-type 'list
+                                                   :null-object nil
+                                                   :false-object :false)
+                              (error
+                               (ip-forgejo--log 'error "JSON parse error: %s"
+                                                (error-message-string parse-err))
+                               nil)))
+                  :sync t
+                  :timeout ip-forgejo-api-timeout
+                  :status-code 'success
+                  :error (cl-function 
+                          (lambda (&key error-thrown &allow-other-keys)
+                            (ip-forgejo--log 'error "Request error: %s" error-thrown)))
+                  :complete (lambda (&rest _)
+                              ;; Force cleanup
+                              (when (and (boundp 'url-http-connection-cache) 
+                                         url-http-connection-cache)
+                                (setq url-http-connection-cache nil))))))
+            (let ((response-data (request-response-data response))
+                  (status (request-response-status-code response)))
+              
+              (cond
+               ((and (>= status 200) (< status 300))
+                (ip-forgejo--log 'success "Response: %d bytes"
+                                 (length (prin1-to-string response-data)))
+                (setq result response-data))
+               
+               ((= status 401)
+                (ip-forgejo--log 'error "HTTP 401 Unauthorized - check token")
+                (setq retries 0))  ;; Don't retry auth errors
+               
+               ((= status 404)
+                (ip-forgejo--log 'error "HTTP 404 Not Found - check URL: %s" url)
+                (setq retries 0))  ;; Don't retry 404 errors
+               
+               (t
+                (ip-forgejo--log 'error "HTTP %d for %s" status url)
+                (when (> retries 1)
+                  (ip-forgejo--log 'warning "Retrying in %d seconds..." delay)
+                  (sit-for delay)
+                  (setq delay (* delay 2)))))))
         
         (error
          (ip-forgejo--log 'error "Request failed: %s" (error-message-string err))
          (when (> retries 1)
            (ip-forgejo--log 'warning "Clearing connections and retrying...")
            (ip-forgejo--clear-cache-and-connections)
-           (sit-for delay)  ;; Use sit-for instead of sleep-for
+           (sit-for delay)
            (setq delay (* delay 2)))))
 
       (setq retries (1- retries)))
@@ -998,6 +1005,72 @@ Imports both open and closed issues."
             (message "✗ Connection failed - no data returned")))
       (error 
        (message "✗ Connection error: %s" (error-message-string err))))))
+
+;;;###autoload  
+(defun ip-forgejo-debug-instance-config ()
+  "Debug current instance configuration."
+  (interactive)
+  (let* ((instance (assoc ip-forgejo-current-instance ip-forgejo-instances))
+         (config (cdr instance))
+         (base-url (alist-get "base-url" config nil nil #'equal))
+         (token (alist-get "token" config nil nil #'equal)))
+    
+    (message "=== Forgejo Instance Debug ===")
+    (message "Current instance: %s" ip-forgejo-current-instance)
+    (message "Base URL: %s" base-url)
+    (message "Token present: %s" (if token "YES" "NO"))
+    (message "Token length: %d" (length token))
+    (message "Token prefix: %s" (if token (substring token 0 8) "N/A"))
+    (message "=============================")))
+
+;;; Test specific endpoints
+
+;;;###autoload
+(defun ip-forgejo-test-endpoints ()
+  "Test various Forgejo API endpoints to diagnose issues."
+  (interactive)
+  (let* ((config (ip-forgejo--current-config))
+         (base-url (car config))
+         (endpoints `(("/user" . "User API")
+                      ("/version" . "Version API")
+                      ("/repos/issues/search?state=open&limit=1" . "Issues API"))))
+    
+    (message "Testing endpoints for: %s" base-url)
+    
+    (dolist (endpoint endpoints)
+      (let ((url (format "%s%s" base-url (car endpoint)))
+            (description (cdr endpoint)))
+        (message "Testing %s: %s" description url)
+        (condition-case err
+            (let ((result (ip-forgejo--api url)))
+              (if result
+                  (message "  ✓ Success")
+                (message "  ✗ Failed - no data")))
+          (error
+           (message "  ✗ Error: %s" (error-message-string err))))))))
+
+;;; Manual configuration helper
+
+;;;###autoload
+(defun ip-forgejo-configure-instance ()
+  "Interactively configure a Forgejo instance."
+  (interactive)
+  (let ((name (read-string "Instance name: "))
+        (base-url (read-string "Base URL (e.g., https://git.example.com/api/v1): "))
+        (token (read-string "API token: ")))
+    
+    ;; Remove existing instance with same name
+    (setq ip-forgejo-instances
+          (cl-remove-if (lambda (x) (string-equal (car x) name)) 
+                       ip-forgejo-instances))
+    
+    ;; Add new instance
+    (push `(,name . (("base-url" . ,base-url)
+                     ("token" . ,token)))
+          ip-forgejo-instances)
+    
+    (setq ip-forgejo-current-instance name)
+    (message "Configured instance: %s" name)))
 
 ;;; Provide
 
