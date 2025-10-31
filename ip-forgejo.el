@@ -220,7 +220,7 @@
 (defun ip-forgejo--clear-cache-and-connections ()
   "Clear API cache and HTTP connection state."
   (clrhash ip-forgejo--cache)
-  (when (boundp 'url-http-connection-cache)
+  (when (and (boundp 'url-http-connection-cache) url-http-connection-cache)
     (clrhash url-http-connection-cache))
   (when (boundp 'request--curl-cookie-jar)
     (setq request--curl-cookie-jar nil))
@@ -259,70 +259,73 @@
          result
          (request-backend 'sync))  ;; Force sync backend to avoid curl issues
 
-  (ip-forgejo--log 'info "Request: GET %s (retries: %d)" url retries)
+    (ip-forgejo--log 'info "Request: GET %s (retries: %d)" url retries)
 
-  (while (and (> retries 0) (not result))
-    (condition-case err
-        (progn
-          ;; Process events to prevent Emacs hanging
-          (while-no-input
-            (let ((response
-                   (request url
-                    :type "GET"
-                    :headers all-headers
-                    :parser (lambda ()
-                              (condition-case parse-err
-                                  (json-parse-string (buffer-string)
-                                                     :object-type 'alist
-                                                     :array-type 'list
-                                                     :null-object nil
-                                                     :false-object :false)
-                                (error
-                                 (ip-forgejo--log 'error "JSON parse error: %s"
-                                                  (error-message-string parse-err))
-                                 nil)))
-                    :sync t
-                    :timeout ip-forgejo-api-timeout
-                    :status-code 'success
-                    :error (cl-function 
-                            (lambda (&key error-thrown &allow-other-keys)
-                              (ip-forgejo--log 'error "Request error: %s" error-thrown)))
-                    :complete (lambda (&rest _)
-                                ;; Force cleanup
-                                (setq url-http-connection-cache nil)))))
-              (let ((response-data (request-response-data response))
-                    (status (request-response-status-code response)))
-                
-                (if (and (>= status 200) (< status 300))
+    (while (and (> retries 0) (not result))
+      (condition-case err
+          (progn
+            ;; Process events to prevent Emacs hanging
+            (while-no-input
+              (let ((response
+                     (request url
+                      :type "GET"
+                      :headers all-headers
+                      :parser (lambda ()
+                                (condition-case parse-err
+                                    (json-parse-string (buffer-string)
+                                                       :object-type 'alist
+                                                       :array-type 'list
+                                                       :null-object nil
+                                                       :false-object :false)
+                                  (error
+                                   (ip-forgejo--log 'error "JSON parse error: %s"
+                                                    (error-message-string parse-err))
+                                   nil)))
+                      :sync t
+                      :timeout ip-forgejo-api-timeout
+                      :status-code 'success
+                      :error (cl-function 
+                              (lambda (&key error-thrown &allow-other-keys)
+                                (ip-forgejo--log 'error "Request error: %s" error-thrown)))
+                      :complete (lambda (&rest _)
+                                  ;; Force cleanup
+                                  (when (and (boundp 'url-http-connection-cache) 
+                                             url-http-connection-cache)
+                                    (setq url-http-connection-cache nil))))))
+                (let ((response-data (request-response-data response))
+                      (status (request-response-status-code response)))
+                  
+                  (if (and (>= status 200) (< status 300))
+                      (progn
+                        (ip-forgejo--log 'success "Response: %d bytes"
+                                         (length (prin1-to-string response-data)))
+                        (setq result response-data))
                     (progn
-                      (ip-forgejo--log 'success "Response: %d bytes"
-                                       (length (prin1-to-string response-data)))
-                      (setq result response-data))
-                  (progn
-                    (ip-forgejo--log 'error "HTTP %d for %s" status url)
-                    (when (> retries 1)
-                      (ip-forgejo--log 'warning "Retrying in %d seconds..." delay)
-                      (sit-for delay)  ;; Use sit-for instead of sleep-for
-                      (setq delay (* delay 2))))))))
-          ;; If while-no-input was aborted, handle it
-          (when (null result)
-            (ip-forgejo--log 'warning "Request aborted by user input")
-            (setq retries 0)))
-      
-      (error
-       (ip-forgejo--log 'error "Request failed: %s" (error-message-string err))
-       (when (> retries 1)
-         (ip-forgejo--log 'warning "Clearing connections and retrying...")
-         (ip-forgejo--clear-cache-and-connections)
-         (sit-for delay)  ;; Use sit-for instead of sleep-for
-         (setq delay (* delay 2)))))
+                      (ip-forgejo--log 'error "HTTP %d for %s" status url)
+                      (when (> retries 1)
+                        (ip-forgejo--log 'warning "Retrying in %d seconds..." delay)
+                        (sit-for delay)  ;; Use sit-for instead of sleep-for
+                        (setq delay (* delay 2))))))))
+            ;; If while-no-input was aborted, handle it
+            (when (null result)
+              (ip-forgejo--log 'warning "Request aborted by user input")
+              (setq retries 0)))
+        
+        (error
+         (ip-forgejo--log 'error "Request failed: %s" (error-message-string err))
+         (when (> retries 1)
+           (ip-forgejo--log 'warning "Clearing connections and retrying...")
+           (ip-forgejo--clear-cache-and-connections)
+           (sit-for delay)  ;; Use sit-for instead of sleep-for
+           (setq delay (* delay 2)))))
 
-    (setq retries (1- retries)))
+      (setq retries (1- retries)))
 
-  (unless result
-    (ip-forgejo--log 'error "All retry attempts failed for %s" url))
+    (unless result
+      (ip-forgejo--log 'error "All retry attempts failed for %s" url))
 
-  result))
+    result))
+
 
 
 (defun ip-forgejo--api (url &optional headers)
@@ -498,6 +501,7 @@
                            (if (ip-forgejo--find-entry-by-url issue-url) "Updated" "Inserted")
                            issue-url)
         (ip-forgejo--log 'warning "Finished processing entry for %s" issue-url))))))
+
 
 ;;; Issue Synchronization
 
@@ -709,7 +713,8 @@ Imports both open and closed issues."
            (closed-issues-url (format "%s/repos/issues/search?assigned=true&state=closed" base-url))
            (all-issues '())
            (total-imported 0)
-           (total-updated 0))
+           (total-updated 0)
+           (total-processed 0))  ;; Define the missing variable
 
       ;; Fetch open issues with progress
       (ip-forgejo--log 'info "Fetching open issues...")
@@ -772,7 +777,8 @@ Imports both open and closed issues."
               (cl-incf total-imported)))
 
           ;; Process events and show progress periodically
-          (when (= (% (cl-incf total-processed) 5) 0)
+          (cl-incf total-processed)  ;; Increment the counter
+          (when (= (% total-processed 5) 0)
             (message "Forgejo import progress: %d/%d issues processed..." 
                      total-processed (length all-issues))
             (sit-for 0.001))  ;; Allow event processing
@@ -800,6 +806,7 @@ Imports both open and closed issues."
 
       (message "Forgejo import completed: %d new, %d updated issues"
                total-imported total-updated))))
+
 
 ;;;###autoload
 (defun ip-forgejo-push-current-entry ()
@@ -959,7 +966,8 @@ Imports both open and closed issues."
   "Emergency function to abort any hanging Forgejo operations."
   (interactive)
   (ip-forgejo--clear-cache-and-connections)
-  (setq url-http-connection-cache nil)
+  (when (and (boundp 'url-http-connection-cache) url-http-connection-cache)
+    (setq url-http-connection-cache nil))
   (when (boundp 'request--curl-cookie-jar)
     (setq request--curl-cookie-jar nil))
   (cancel-function-timers 'ip-forgejo--api-request)
@@ -967,6 +975,7 @@ Imports both open and closed issues."
 
 ;;; Add keybinding for emergency abort
 (define-key ip-forgejo-mode-map (kbd "C-c f a") 'ip-forgejo-abort-operation)
+
 
 ;;; Debugging function
 
