@@ -74,7 +74,7 @@
     ("home"    . (("base-url" . "https://git.home.org/api/v1")
                   ("token"    . "tkn_home_456")))
     ("client"  . (("base-url" . "http://git.maketv.internal/api/v1")
-                  ("token"    . "52ba51cd10ba0250444d872e10ac1dd730cee076"))))
+                  ("token"    . "b39a2627f82ddea7cce01b7706d8e9e54bb72234"))))
   "List of Forgejo instances configuration."
   :type '(alist :key-type string
                 :value-type (alist :key-type string :value-type string))
