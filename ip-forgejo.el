@@ -166,16 +166,16 @@
     (org-back-to-heading t)
     (let (url)
       ;; Method 1: Try org-entry-get (for standard properties)
-      (setq url (org-entry-get nil "FORGEJO_URL"))
+      (setq url (org-entry-get nil "FORGEJO_URL" t))
       
       ;; Method 2: Search in properties drawer
       (unless url
         (save-excursion
-          (when (re-search-forward "^\\s-*:PROPERTIES:" 
+          (when (re-search-forward "^[ \t]*:PROPERTIES:" 
                                   (save-excursion (org-end-of-subtree t) (point)) t)
-            (when (re-search-forward "^\\s-*:FORGEJO_URL:\\s-+\\(.*\\)" 
+            (when (re-search-forward "^[ \t]*:FORGEJO_URL:[ \t]+\\(.*\\)" 
                                     (save-excursion 
-                                      (re-search-forward "^\\s-*:END:" (point-max) t) 
+                                      (re-search-forward "^[ \t]*:END:" (point-max) t) 
                                       (point)) t)
               (setq url (string-trim (match-string 1)))))))
       
@@ -183,22 +183,27 @@
       (unless url
         (save-excursion
           (let ((end (save-excursion (org-end-of-subtree t) (point))))
-            (when (re-search-forward ":FORGEJO_URL:\\s-+\\([^\n]+\\)" end t)
+            (when (re-search-forward ":FORGEJO_URL:[ \t]+\\([^\n]+\\)" end t)
               (setq url (string-trim (match-string 1)))))))
       
+      (ip-forgejo--log 'debug "Found FORGEJO_URL: %s" url)
       url)))
 
 (defun ip-forgejo--find-entry-by-url (issue-url)
-  "Find Org heading by FORGEJO_URL property."
+  "Find Org heading by FORGEJO_URL property in current buffer."
   (save-excursion
     (goto-char (point-min))
     (catch 'found
-      (while (re-search-forward "^\\*+ " nil t)
+      (while (re-search-forward "^\*+ " nil t)
         (let ((heading-start (match-beginning 0)))
           (goto-char heading-start)
-          (when (string-equal (ip-forgejo--get-forgejo-url-from-current-entry) issue-url)
-            (throw 'found (point)))))
-      nil)))
+          (let ((current-url (ip-forgejo--get-forgejo-url-from-current-entry)))
+            (when (and current-url (string-equal current-url issue-url))
+              (ip-forgejo--log 'debug "Found existing entry for %s at position %d" 
+                               issue-url heading-start)
+              (throw 'found heading-start))))))
+      (ip-forgejo--log 'debug "No existing entry found for %s" issue-url)
+      nil))
 
 ;;; Cache Management
 
@@ -758,7 +763,6 @@
       (message "========================"))))
 
 ;;;###autoload
-;;;###autoload
 (defun ip-forgejo-import-my-issues (&optional instance)
   "Import assigned issues from current or specified Forgejo INSTANCE.
 Imports both open and closed issues."
@@ -841,20 +845,19 @@ Imports both open and closed issues."
                    ;; Generate issue URL first
                    (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
                    (issue-url (format "%s/%s/%s/issues/%s"
-                                      web-url owner-name repo-name issue-number)))
+                                      web-url owner-name repo-name issue-number))
+                   ;; ALWAYS load time logs for ALL issues
+                   (times-url (format "%s/repos/%s/%s/issues/%d/times"
+                                      base-url owner-name repo-name issue-number))
+                   (times-data (ip-forgejo--api times-url))
+                   (times (ip-forgejo--ensure-list times-data))
+                   ;; Format the entry
+                   (entry (ip-forgejo--format-entry issue times)))
 
-              (ip-forgejo--log 'info "Processing %s issue %s" state issue-id)
+              (ip-forgejo--log 'info "Processing %s issue %s (times: %d)" 
+                               state issue-id (length times))
 
-              ;; Only fetch times for existing entries to reduce API calls
-              (let* ((existing-pos (ip-forgejo--find-entry-by-url issue-url))
-                     (times-url (when existing-pos
-                                  (format "%s/repos/%s/%s/issues/%d/times"
-                                          base-url owner-name repo-name issue-number)))
-                     (times-data (when times-url (ip-forgejo--api times-url)))
-                     (times (ip-forgejo--ensure-list times-data))
-                     ;; Format the entry
-                     (entry (ip-forgejo--format-entry issue times)))
-
+              (let ((existing-pos (ip-forgejo--find-entry-by-url issue-url)))
                 (ip-forgejo--replace-or-insert-entry issue-url entry)
 
                 (if existing-pos
@@ -875,7 +878,7 @@ Imports both open and closed issues."
                        total-imported total-updated)
 
       ;; Force buffer redisplay and save
-      (when (and (> total-imported 0) (buffer-file-name))
+      (when (and (> (+ total-imported total-updated) 0) (buffer-file-name))
         (save-buffer)
         (ip-forgejo--log 'info "Buffer saved to %s" (buffer-file-name)))
 
@@ -897,7 +900,6 @@ Imports both open and closed issues."
 
       (message "Forgejo import completed: %d new, %d updated issues in %s"
                total-imported total-updated (buffer-name)))))
-
 
 ;;;###autoload
 (defun ip-forgejo-push-current-entry ()
@@ -1166,6 +1168,77 @@ Imports both open and closed issues."
     (unless (bolp) (insert "\n"))
     (insert test-entry)
     (message "Inserted test entry at position %d" (- (point) (length test-entry)))))
+
+;;; Debugging functions
+
+;;;###autoload
+(defun ip-forgejo-debug-issue-times (issue-url)
+  "Debug time logs for specific issue URL."
+  (interactive "sIssue URL: ")
+  (let* ((url-parts (split-string issue-url "/" t))
+         (owner (nth -4 url-parts))
+         (repo (nth -3 url-parts))
+         (issue-number (string-to-number (nth -1 url-parts)))
+         (config (ip-forgejo--current-config))
+         (base-url (car config))
+         (times-url (format "%s/repos/%s/%s/issues/%d/times"
+                            base-url owner repo issue-number))
+         (times-data (ip-forgejo--api times-url))
+         (times (ip-forgejo--ensure-list times-data)))
+    
+    (message "=== Time Logs Debug for %s ===" issue-url)
+    (message "Times URL: %s" times-url)
+    (message "Number of time entries: %d" (length times))
+    (dolist (time times)
+      (message "Time: %d seconds, Created: %s" 
+               (or (alist-get 'time time) 0)
+               (alist-get 'created time)))
+    (message "Total time: %d seconds" 
+             (cl-reduce #'+ (mapcar (lambda (e) (or (alist-get 'time e) 0)) times)))
+    (message "==============================")))
+
+;;;###autoload
+(defun ip-forgejo-test-import-with-times ()
+  "Test import with forced time loading for first issue."
+  (interactive)
+  (let* ((config (ip-forgejo--current-config))
+         (base-url (car config))
+         (test-url (format "%s/repos/issues/search?state=open&limit=1" base-url))
+         (test-data (ip-forgejo--api test-url)))
+    
+    (if test-data
+        (let ((issue (car (ip-forgejo--ensure-list test-data))))
+          (when issue
+            (let* ((issue-id (alist-get 'id issue))
+                   (repo-data (alist-get 'repository issue))
+                   (owner-data (alist-get 'owner repo-data))
+                   (owner-name (if (stringp owner-data)
+                                   owner-data
+                                 (alist-get 'login owner-data)))
+                   (repo-name (alist-get 'name repo-data))
+                   (issue-number (alist-get 'number issue))
+                   ;; Generate issue URL
+                   (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
+                   (issue-url (format "%s/%s/%s/issues/%s"
+                                      web-url owner-name repo-name issue-number))
+                   ;; Load times
+                   (times-url (format "%s/repos/%s/%s/issues/%d/times"
+                                      base-url owner-name repo-name issue-number))
+                   (times-data (ip-forgejo--api times-url))
+                   (times (ip-forgejo--ensure-list times-data))
+                   ;; Format entry
+                   (entry (ip-forgejo--format-entry issue times)))
+              
+              (message "Testing import for issue: %s" issue-url)
+              (message "Time entries: %d" (length times))
+              (message "Total time: %d seconds" 
+                       (cl-reduce #'+ (mapcar (lambda (e) (or (alist-get 'time e) 0)) times)))
+              
+              (goto-char (point-max))
+              (unless (bolp) (insert "\n"))
+              (insert entry "\n")
+              (message "Inserted test issue with time logs"))))
+      (message "✗ Test failed - no issues found"))))
 
 ;;; Manual configuration helper
 
