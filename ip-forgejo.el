@@ -246,6 +246,21 @@
         (goto-char (point-max))
         (insert (format "%s%s %s\n" timestamp icon formatted-msg))))))
 
+;;;###autoload
+(defun ip-forgejo-debug-buffer-state ()
+  "Debug current buffer state for Forgejo import."
+  (interactive)
+  (message "=== Buffer Debug Info ===")
+  (message "Buffer name: %s" (buffer-name))
+  (message "Buffer live: %s" (buffer-live-p (current-buffer)))
+  (message "Buffer size: %d" (buffer-size))
+  (message "Point: %d" (point))
+  (message "Point min: %d, max: %d" (point-min) (point-max))
+  (message "Read only: %s" buffer-read-only)
+  (message "File: %s" (buffer-file-name))
+  (message "========================"))
+
+
 ;;; API Communication
 
 (defun ip-forgejo--api-request (url &optional headers max-retries)
@@ -492,53 +507,73 @@
 ;;; Issue Management
 
 (defun ip-forgejo--replace-or-insert-entry (issue-url entry)
-  "Find Org heading by FORGEJO_URL and replace its subtree with ENTRY."
-  (with-current-buffer (current-buffer)
-    (let ((inhibit-modification-hooks t)
-          (inhibit-read-only t)
-          (buffer-undo-list t)
-          modified-pos)
+  "Find Org heading by FORGEJO_URL and replace its subtree with ENTRY in current buffer."
+  (unless (buffer-live-p (current-buffer))
+    (ip-forgejo--log 'error "Buffer is not live")
+    (return-from ip-forgejo--replace-or-insert-entry))
+  
+  (let ((inhibit-modification-hooks t)
+        (inhibit-read-only t)
+        modified-pos
+        success)
 
-      ;; Reset cache before changes
-      (org-element-cache-reset 'force)
-      (setq org-element--cache nil)
-      (setq org-element--cache-sync-timer nil)
-      (when (timerp org-element--cache-sync-timer)
-        (cancel-timer org-element--cache-sync-timer)
-        (setq org-element--cache-sync-timer nil))
+    (save-excursion
+      (save-restriction
+        (widen)
+        
+        ;; Reset cache before changes
+        (org-element-cache-reset 'force)
+        (setq org-element--cache nil)
+        (setq org-element--cache-sync-timer nil)
+        (when (timerp org-element--cache-sync-timer)
+          (cancel-timer org-element--cache-sync-timer)
+          (setq org-element--cache-sync-timer nil))
 
-      ;; Find and update entry
-      (let ((existing-pos (ip-forgejo--find-entry-by-url issue-url)))
-        (if existing-pos
+        ;; Find and update entry
+        (let ((existing-pos (ip-forgejo--find-entry-by-url issue-url)))
+          (if existing-pos
+              ;; Update existing entry
+              (progn
+                (goto-char existing-pos)
+                (let ((beg (point))
+                      (end (save-excursion
+                             (condition-case nil
+                                 (org-end-of-subtree t t)
+                               (error
+                                (if (re-search-forward org-heading-regexp nil t)
+                                    (goto-char (match-beginning 0))
+                                  (goto-char (point-max))))
+                             (point))))
+                      (line-beg (line-beginning-position)))
+                  
+                  ;; Ensure we're at the beginning of the heading line
+                  (goto-char line-beg)
+                  (delete-region line-beg end)
+                  (insert entry "\n")
+                  (setq modified-pos line-beg
+                        success t)
+                  (ip-forgejo--log 'debug "Updated entry for %s at position %d" 
+                                   issue-url modified-pos)))
+            
+            ;; Insert new entry
             (progn
-              (goto-char existing-pos)
-              (let ((beg (point))
-                    (end (save-excursion
-                           (condition-case nil
-                               (org-end-of-subtree t t)
-                             (error
-                              (if (re-search-forward org-heading-regexp nil t)
-                                  (goto-char (match-beginning 0))
-                                (goto-char (point-max))))
-                           (point))))
-                (delete-region beg end)
-                (insert entry "\n")
-                (setq modified-pos beg)
-                (ip-forgejo--log 'debug "Updated entry for %s" issue-url)))
-          (progn
-            (goto-char (point-max))
-            (unless (bolp) (insert "\n"))
-            (let ((insert-pos (point)))
+              (goto-char (point-max))
+              (unless (or (bobp) (bolp)) 
+                (insert "\n"))
+              (setq modified-pos (point))
               (insert entry "\n")
-              (setq modified-pos insert-pos))
-            (ip-forgejo--log 'debug "Inserted new entry for %s" issue-url))))
+              (setq success t)
+              (ip-forgejo--log 'debug "Inserted new entry for %s at position %d" 
+                               issue-url modified-pos))))))
 
-      ;; Log result
-      (if (and modified-pos (>= modified-pos (point-min)) (<= modified-pos (point-max)))
-          (ip-forgejo--log 'success "%s entry: %s"
-                           (if (ip-forgejo--find-entry-by-url issue-url) "Updated" "Inserted")
-                           issue-url)
-        (ip-forgejo--log 'warning "Finished processing entry for %s" issue-url))))))
+    ;; Log result
+    (cond
+     (success
+      (ip-forgejo--log 'success "%s entry: %s"
+                       (if (ip-forgejo--find-entry-by-url issue-url) "Updated" "Inserted")
+                       issue-url))
+     (t
+      (ip-forgejo--log 'warning "Failed to process entry for %s" issue-url)))))
 
 
 ;;; Issue Synchronization
@@ -723,6 +758,7 @@
       (message "========================"))))
 
 ;;;###autoload
+;;;###autoload
 (defun ip-forgejo-import-my-issues (&optional instance)
   "Import assigned issues from current or specified Forgejo INSTANCE.
 Imports both open and closed issues."
@@ -732,6 +768,13 @@ Imports both open and closed issues."
 
   (ip-forgejo--log 'info "Starting import from instance: %s"
                    ip-forgejo-current-instance)
+
+  ;; Verify we're in a proper buffer
+  (unless (buffer-live-p (current-buffer))
+    (ip-forgejo--log 'error "Current buffer is not live")
+    (error "Current buffer is not live"))
+
+  (ip-forgejo--log 'info "Importing to buffer: %s" (buffer-name))
 
   ;; Clear cache before starting
   (ip-forgejo--clear-cache-and-connections)
@@ -752,7 +795,7 @@ Imports both open and closed issues."
            (all-issues '())
            (total-imported 0)
            (total-updated 0)
-           (total-processed 0))  ;; Define the missing variable
+           (total-processed 0))
 
       ;; Fetch open issues with progress
       (ip-forgejo--log 'info "Fetching open issues...")
@@ -761,7 +804,6 @@ Imports both open and closed issues."
           (setq all-issues (append all-issues (ip-forgejo--ensure-list open-issues-data)))
           (ip-forgejo--log 'info "Found %d open issues" 
                            (length (ip-forgejo--ensure-list open-issues-data))))
-        ;; Process pending events
         (sit-for 0.01))
 
       ;; Fetch closed issues with progress  
@@ -780,52 +822,62 @@ Imports both open and closed issues."
       (ip-forgejo--log 'info "Processing %d total issues for user %s"
                        (length all-issues) username)
 
-      ;; Process each issue with progress
-      (dolist (issue all-issues)
-        (let* ((issue-id (alist-get 'id issue))
-               (repo-data (alist-get 'repository issue))
-               (owner-data (alist-get 'owner repo-data))
-               (owner-name (if (stringp owner-data)
-                               owner-data
-                             (alist-get 'login owner-data)))
-               (repo-name (alist-get 'name repo-data))
-               (issue-number (alist-get 'number issue))
-               (state (alist-get 'state issue))
-               ;; Generate issue URL first
-               (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
-               (issue-url (format "%s/%s/%s/issues/%s"
-                                  web-url owner-name repo-name issue-number)))
+      ;; Save buffer state before modifications
+      (save-excursion
+        (save-restriction
+          (widen)
+          
+          ;; Process each issue with progress
+          (dolist (issue all-issues)
+            (let* ((issue-id (alist-get 'id issue))
+                   (repo-data (alist-get 'repository issue))
+                   (owner-data (alist-get 'owner repo-data))
+                   (owner-name (if (stringp owner-data)
+                                   owner-data
+                                 (alist-get 'login owner-data)))
+                   (repo-name (alist-get 'name repo-data))
+                   (issue-number (alist-get 'number issue))
+                   (state (alist-get 'state issue))
+                   ;; Generate issue URL first
+                   (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
+                   (issue-url (format "%s/%s/%s/issues/%s"
+                                      web-url owner-name repo-name issue-number)))
 
-          (ip-forgejo--log 'info "Processing %s issue %s" state issue-id)
+              (ip-forgejo--log 'info "Processing %s issue %s" state issue-id)
 
-          ;; Only fetch times for existing entries to reduce API calls
-          (let* ((existing-pos (ip-forgejo--find-entry-by-url issue-url))
-                 (times-url (when existing-pos
-                              (format "%s/repos/%s/%s/issues/%d/times"
-                                      base-url owner-name repo-name issue-number)))
-                 (times-data (when times-url (ip-forgejo--api times-url)))
-                 (times (ip-forgejo--ensure-list times-data))
-                 ;; Format the entry
-                 (entry (ip-forgejo--format-entry issue times)))
+              ;; Only fetch times for existing entries to reduce API calls
+              (let* ((existing-pos (ip-forgejo--find-entry-by-url issue-url))
+                     (times-url (when existing-pos
+                                  (format "%s/repos/%s/%s/issues/%d/times"
+                                          base-url owner-name repo-name issue-number)))
+                     (times-data (when times-url (ip-forgejo--api times-url)))
+                     (times (ip-forgejo--ensure-list times-data))
+                     ;; Format the entry
+                     (entry (ip-forgejo--format-entry issue times)))
 
-            (ip-forgejo--replace-or-insert-entry issue-url entry)
+                (ip-forgejo--replace-or-insert-entry issue-url entry)
 
-            (if existing-pos
-                (cl-incf total-updated)
-              (cl-incf total-imported)))
+                (if existing-pos
+                    (cl-incf total-updated)
+                  (cl-incf total-imported)))
 
-          ;; Process events and show progress periodically
-          (cl-incf total-processed)  ;; Increment the counter
-          (when (= (% total-processed 5) 0)
-            (message "Forgejo import progress: %d/%d issues processed..." 
-                     total-processed (length all-issues))
-            (sit-for 0.001))  ;; Allow event processing
+              ;; Process events and show progress periodically
+              (cl-incf total-processed)
+              (when (= (% total-processed 5) 0)
+                (message "Forgejo import progress: %d/%d issues processed..." 
+                         total-processed (length all-issues))
+                (sit-for 0.001))
 
-          ;; Small delay to prevent overwhelming the server
-          (sit-for 0.05)))
+              ;; Small delay to prevent overwhelming the server
+              (sit-for 0.05)))))
 
       (ip-forgejo--log 'success "Import completed: %d new, %d updated"
                        total-imported total-updated)
+
+      ;; Force buffer redisplay and save
+      (when (and (> total-imported 0) (buffer-file-name))
+        (save-buffer)
+        (ip-forgejo--log 'info "Buffer saved to %s" (buffer-file-name)))
 
       ;; Display sync report
       (with-current-buffer (get-buffer-create ip-forgejo--sync-buffer-name)
@@ -839,11 +891,12 @@ Imports both open and closed issues."
           (insert (format "Total issues processed: %d\n" (length all-issues)))
           (insert (format "New entries: %d\n" total-imported))
           (insert (format "Updated entries: %d\n" total-updated))
+          (insert (format "Target buffer: %s\n" (buffer-name)))
           (insert (make-string 50 ?=) "\n"))
         (display-buffer (current-buffer)))
 
-      (message "Forgejo import completed: %d new, %d updated issues"
-               total-imported total-updated))))
+      (message "Forgejo import completed: %d new, %d updated issues in %s"
+               total-imported total-updated (buffer-name)))))
 
 
 ;;;###autoload
@@ -1103,6 +1156,16 @@ Imports both open and closed issues."
                 (message "  ✗ Failed - no data")))
           (error
            (message "  ✗ Error: %s" (error-message-string err))))))))
+
+;;;###autoload
+(defun ip-forgejo-test-insert-simple ()
+  "Test simple insertion into current buffer."
+  (interactive)
+  (let ((test-entry "* TODO Test Entry\nTest content\n"))
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    (insert test-entry)
+    (message "Inserted test entry at position %d" (- (point) (length test-entry)))))
 
 ;;; Manual configuration helper
 
