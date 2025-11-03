@@ -128,49 +128,77 @@ On error, call ERROR-CALLBACK with error message."
   (let* ((config (ip-forgejo--config))
          (token (cdr config))
          (headers `(("Authorization" . ,(concat "token " token))))
-         (request-called nil))
+         (request-called nil)
+         (request-start (current-time)))
+    
+    (ip-forgejo--log 'info "→ REQUEST: %s" url)
     
     (request url
       :type "GET"
       :headers headers
       :parser (lambda ()
                 (condition-case err
-                    (json-parse-string (buffer-string)
-                                       :object-type 'alist
-                                       :array-type 'list
-                                       :null-object nil
-                                       :false-object :false)
+                    (let ((json-str (buffer-string)))
+                      (ip-forgejo--log 'info "← PARSE: %d bytes" (length json-str))
+                      (json-parse-string json-str
+                                         :object-type 'alist
+                                         :array-type 'list
+                                         :null-object nil
+                                         :false-object :false))
                   (error
-                   (ip-forgejo--log 'error "JSON parse error: %s" err)
+                   (ip-forgejo--log 'error "← PARSE ERROR: %s" err)
                    nil)))
       :success (cl-function
-                (lambda (&key data &allow-other-keys)
+                (lambda (&key data response &allow-other-keys)
                   (setq request-called t)
-                  (when data
-                    (funcall callback data))))
+                  (let* ((duration (float-time (time-subtract (current-time) request-start)))
+                         (status (request-response-status-code response))
+                         (data-type (type-of data))
+                         (data-length (cond
+                                       ((listp data) (length data))
+                                       ((vectorp data) (length data))
+                                       ((stringp data) (length data))
+                                       (t 0))))
+                    (ip-forgejo--log 'success "← SUCCESS: status=%s, type=%s, length=%d, time=%.2fs"
+                                     status data-type data-length duration)
+                    (when data
+                      (funcall callback data)))))
       :error (cl-function
-              (lambda (&key error-thrown response &allow-other-keys)
+              (lambda (&key error-thrown response symbol-status &allow-other-keys)
                 (setq request-called t)
-                (let ((err-msg (format "%s" error-thrown)))
+                (let* ((duration (float-time (time-subtract (current-time) request-start)))
+                       (status (if response
+                                   (request-response-status-code response)
+                                 "no-response"))
+                       (err-msg (format "%s" error-thrown)))
+                  (ip-forgejo--log 'error "← ERROR: status=%s, symbol=%s, error=%s, time=%.2fs"
+                                   status symbol-status err-msg duration)
                   (if error-callback
                       (funcall error-callback err-msg)
-                    (ip-forgejo--log 'error "Request failed for %s: %s" url err-msg)))))
+                    (ip-forgejo--log 'error "No error callback for: %s" url)))))
       :complete (cl-function
-                 (lambda (&rest _)
-                   ;; Safety net: if neither success nor error was called
-                   (unless request-called
-                     (ip-forgejo--log 'warning "Request completed without callback: %s" url)
-                     (when error-callback
-                       (funcall error-callback "Request completed without callback")))))
+                 (lambda (&key response &allow-other-keys)
+                   (let ((duration (float-time (time-subtract (current-time) request-start)))
+                         (status (if response
+                                     (request-response-status-code response)
+                                   "no-response")))
+                     (ip-forgejo--log 'info "← COMPLETE: status=%s, called=%s, time=%.2fs"
+                                      status request-called duration)
+                     ;; Safety net: if neither success nor error was called
+                     (unless request-called
+                       (ip-forgejo--log 'warning "← NO CALLBACK INVOKED for: %s" url)
+                       (when error-callback
+                         (funcall error-callback "Request completed without callback"))))))
       :timeout 15)  ; Reduced timeout to 15 seconds
     
     ;; Additional safety: schedule a timeout check
     (run-with-timer 20 nil
                     (lambda ()
                       (unless request-called
-                        (ip-forgejo--log 'error "Request timeout (20s): %s" url)
-                        (when error-callback
-                          (funcall error-callback "Request timeout")))))))
+                        (let ((duration (float-time (time-subtract (current-time) request-start))))
+                          (ip-forgejo--log 'error "← TIMEOUT (20s): %s, time=%.2fs" url duration)
+                          (when error-callback
+                            (funcall error-callback "Request timeout"))))))))
 
 
 ;;; ============================================================================
@@ -317,6 +345,7 @@ On error, call ERROR-CALLBACK with error message."
          (owner (ip-forgejo--extract-owner repo))
          (repo-name (ip-forgejo--extract-repo-name repo))
          (number (alist-get 'number issue))
+         (issue-id (alist-get 'id issue))
          (config (ip-forgejo--config))
          (base-url (car config))
          (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
@@ -324,45 +353,64 @@ On error, call ERROR-CALLBACK with error message."
          (times-url (format "%s/repos/%s/%s/issues/%d/times"
                             base-url owner repo-name number)))
     
-    (ip-forgejo--log 'info "Fetching times for issue #%d (%s/%s)" 
-                     number owner repo-name)
+    (ip-forgejo--log 'info "→ PROCESS: issue #%d (id=%s, %s/%s)" 
+                     number issue-id owner repo-name)
     
     ;; Fetch time logs asynchronously
     (ip-forgejo--api-async
      times-url
      (lambda (times)
        ;; Success: format and insert
-       (ip-forgejo--log 'info "Got %d time entries for issue #%d" 
-                        (length times) number)
-       (let ((entry (ip-forgejo--format-entry issue times)))
-         
-         (with-current-buffer (ip-forgejo-import-state-buffer state)
-           (save-excursion
-             (let ((result (ip-forgejo--insert-or-update issue-url entry)))
-               (cl-incf (ip-forgejo-import-state-processed state))
-               (when (eq result 'inserted)
-                 (cl-incf (ip-forgejo-import-state-inserted state)))
-               (when (eq result 'updated)
-                 (cl-incf (ip-forgejo-import-state-updated state)))
-               
-               (ip-forgejo--progress state)
-               
-               ;; Check if done
-               (when (>= (ip-forgejo-import-state-processed state)
-                         (ip-forgejo-import-state-total state))
-                 (ip-forgejo--import-complete state)))))))
+       (let ((times-count (if (listp times) (length times) 0)))
+         (ip-forgejo--log 'info "← RECEIVED: issue #%d has %d time entries" 
+                          number times-count)
+         (let ((entry (ip-forgejo--format-entry issue times)))
+           
+           (ip-forgejo--log 'info "→ INSERT/UPDATE: issue #%d to buffer %s"
+                            number (buffer-name (ip-forgejo-import-state-buffer state)))
+           
+           (condition-case err
+               (with-current-buffer (ip-forgejo-import-state-buffer state)
+                 (save-excursion
+                   (let ((result (ip-forgejo--insert-or-update issue-url entry)))
+                     (cl-incf (ip-forgejo-import-state-processed state))
+                     (when (eq result 'inserted)
+                       (cl-incf (ip-forgejo-import-state-inserted state)))
+                     (when (eq result 'updated)
+                       (cl-incf (ip-forgejo-import-state-updated state)))
+                     
+                     (ip-forgejo--log 'success "✓ DONE: issue #%d (%s)" number result)
+                     (ip-forgejo--progress state)
+                     
+                     ;; Check if done
+                     (when (>= (ip-forgejo-import-state-processed state)
+                               (ip-forgejo-import-state-total state))
+                       (ip-forgejo--log 'success "ALL ISSUES PROCESSED - completing import")
+                       (ip-forgejo--import-complete state)))))
+             (error
+              (ip-forgejo--log 'error "✗ FAILED to insert issue #%d: %s" number err)
+              (cl-incf (ip-forgejo-import-state-processed state))
+              (push (format "Issue #%d insert failed: %s" number err)
+                    (ip-forgejo-import-state-errors state))
+              (ip-forgejo--progress state)
+              
+              ;; Check if done despite error
+              (when (>= (ip-forgejo-import-state-processed state)
+                        (ip-forgejo-import-state-total state))
+                (ip-forgejo--import-complete state)))))))
      
      ;; Error callback
      (lambda (err)
+       (ip-forgejo--log 'error "✗ FAILED to fetch times for issue #%d: %s" number err)
        (cl-incf (ip-forgejo-import-state-processed state))
-       (push (format "Issue #%d: %s" number err)
+       (push (format "Issue #%d times fetch failed: %s" number err)
              (ip-forgejo-import-state-errors state))
-       (ip-forgejo--log 'error "Failed to load times for issue #%d: %s" number err)
        (ip-forgejo--progress state)
        
        ;; Check if done despite error
        (when (>= (ip-forgejo-import-state-processed state)
                  (ip-forgejo-import-state-total state))
+         (ip-forgejo--log 'warning "All issues attempted despite errors - completing import")
          (ip-forgejo--import-complete state))))))
 
 (defun ip-forgejo--import-complete (state &optional forced)
@@ -537,7 +585,26 @@ On error, call ERROR-CALLBACK with error message."
 (defun ip-forgejo-show-log ()
   "Show Forgejo import log buffer."
   (interactive)
-  (display-buffer (get-buffer-create "*Forgejo Log*")))
+  (let ((buf (get-buffer-create "*Forgejo Log*")))
+    (with-current-buffer buf
+      (goto-char (point-max)))
+    (display-buffer buf)))
+
+;;;###autoload
+(defun ip-forgejo-debug-state ()
+  "Show current import state for debugging."
+  (interactive)
+  (if ip-forgejo--import-state
+      (let ((state ip-forgejo--import-state))
+        (message "Import state: %d/%d processed, %d new, %d updated, %d errors"
+                 (ip-forgejo-import-state-processed state)
+                 (ip-forgejo-import-state-total state)
+                 (ip-forgejo-import-state-inserted state)
+                 (ip-forgejo-import-state-updated state)
+                 (length (ip-forgejo-import-state-errors state)))
+        (when (ip-forgejo-import-state-errors state)
+          (message "Errors: %s" (ip-forgejo-import-state-errors state))))
+    (message "No import in progress")))
 
 ;;; ============================================================================
 ;;; Minor Mode
@@ -550,6 +617,7 @@ On error, call ERROR-CALLBACK with error message."
     (define-key map (kbd "C-c f a") 'ip-forgejo-abort-import)
     (define-key map (kbd "C-c f l") 'ip-forgejo-show-log)
     (define-key map (kbd "C-c f f") 'ip-forgejo-force-complete)
+    (define-key map (kbd "C-c f d") 'ip-forgejo-debug-state)
     map)
   "Keymap for `ip-forgejo-mode'.")
 
