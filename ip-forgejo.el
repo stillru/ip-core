@@ -46,6 +46,9 @@
 (defvar ip-forgejo--import-state nil
   "State of current import operation.")
 
+(defvar ip-forgejo--import-timeout-timer nil
+  "Timer for import timeout watchdog.")
+
 (cl-defstruct ip-forgejo-import-state
   buffer           ; Target Org buffer
   issues           ; List of issues to process
@@ -54,7 +57,8 @@
   inserted         ; Count of new entries
   updated          ; Count of updates
   errors           ; List of errors
-  start-time)      ; Import start time
+  start-time       ; Import start time
+  last-activity)   ; Last activity timestamp
 
 ;;; ============================================================================
 ;;; Utility Functions
@@ -87,6 +91,9 @@
 (defun ip-forgejo--progress (state)
   "Update progress message for STATE."
   (when state
+    ;; Update last activity timestamp
+    (setf (ip-forgejo-import-state-last-activity state) (current-time))
+    
     (let* ((processed (ip-forgejo-import-state-processed state))
            (total (ip-forgejo-import-state-total state))
            (pct (if (> total 0)
@@ -97,6 +104,20 @@
                (ip-forgejo-import-state-inserted state)
                (ip-forgejo-import-state-updated state)))))
 
+(defun ip-forgejo--check-stalled ()
+  "Check if import has stalled and force completion if needed."
+  (when ip-forgejo--import-state
+    (let* ((now (current-time))
+           (last (ip-forgejo-import-state-last-activity ip-forgejo--import-state))
+           (idle-seconds (time-to-seconds (time-subtract now last))))
+      
+      ;; If no activity for 10 seconds, consider it stalled
+      (when (> idle-seconds 10)
+        (ip-forgejo--log 'warning 
+                         "Import stalled for %d seconds. Forcing completion..."
+                         idle-seconds)
+        (ip-forgejo--import-complete ip-forgejo--import-state t)))))
+
 ;;; ============================================================================
 ;;; API Layer - Asynchronous
 ;;; ============================================================================
@@ -106,7 +127,8 @@
 On error, call ERROR-CALLBACK with error message."
   (let* ((config (ip-forgejo--config))
          (token (cdr config))
-         (headers `(("Authorization" . ,(concat "token " token)))))
+         (headers `(("Authorization" . ,(concat "token " token))))
+         (request-called nil))
     
     (request url
       :type "GET"
@@ -123,15 +145,33 @@ On error, call ERROR-CALLBACK with error message."
                    nil)))
       :success (cl-function
                 (lambda (&key data &allow-other-keys)
+                  (setq request-called t)
                   (when data
                     (funcall callback data))))
       :error (cl-function
               (lambda (&key error-thrown response &allow-other-keys)
+                (setq request-called t)
                 (let ((err-msg (format "%s" error-thrown)))
                   (if error-callback
                       (funcall error-callback err-msg)
                     (ip-forgejo--log 'error "Request failed for %s: %s" url err-msg)))))
-      :timeout 30)))
+      :complete (cl-function
+                 (lambda (&rest _)
+                   ;; Safety net: if neither success nor error was called
+                   (unless request-called
+                     (ip-forgejo--log 'warning "Request completed without callback: %s" url)
+                     (when error-callback
+                       (funcall error-callback "Request completed without callback")))))
+      :timeout 15)  ; Reduced timeout to 15 seconds
+    
+    ;; Additional safety: schedule a timeout check
+    (run-with-timer 20 nil
+                    (lambda ()
+                      (unless request-called
+                        (ip-forgejo--log 'error "Request timeout (20s): %s" url)
+                        (when error-callback
+                          (funcall error-callback "Request timeout")))))))
+
 
 ;;; ============================================================================
 ;;; Data Extraction Helpers
@@ -325,30 +365,51 @@ On error, call ERROR-CALLBACK with error message."
                  (ip-forgejo-import-state-total state))
          (ip-forgejo--import-complete state))))))
 
-(defun ip-forgejo--import-complete (state)
-  "Handle completion of import STATE."
+(defun ip-forgejo--import-complete (state &optional forced)
+  "Handle completion of import STATE. If FORCED, mention incomplete status."
   (let ((duration (time-subtract (current-time)
                                  (ip-forgejo-import-state-start-time state)))
-        (buffer (ip-forgejo-import-state-buffer state)))
+        (buffer (ip-forgejo-import-state-buffer state))
+        (processed (ip-forgejo-import-state-processed state))
+        (total (ip-forgejo-import-state-total state)))
     
     (with-current-buffer buffer
       (save-buffer))
     
-    (ip-forgejo--log 'success
-                     "Import complete: %d inserted, %d updated, %d errors (%.1fs)"
-                     (ip-forgejo-import-state-inserted state)
-                     (ip-forgejo-import-state-updated state)
-                     (length (ip-forgejo-import-state-errors state))
-                     (float-time duration))
+    (if forced
+        (progn
+          (ip-forgejo--log 'warning
+                           "Import INCOMPLETE (forced): %d/%d processed, %d inserted, %d updated, %d errors (%.1fs)"
+                           processed total
+                           (ip-forgejo-import-state-inserted state)
+                           (ip-forgejo-import-state-updated state)
+                           (length (ip-forgejo-import-state-errors state))
+                           (float-time duration))
+          (message "Forgejo import INCOMPLETE: %d/%d processed (%d new, %d updated) - check *Forgejo Log*"
+                   processed total
+                   (ip-forgejo-import-state-inserted state)
+                   (ip-forgejo-import-state-updated state)))
+      
+      (ip-forgejo--log 'success
+                       "Import complete: %d inserted, %d updated, %d errors (%.1fs)"
+                       (ip-forgejo-import-state-inserted state)
+                       (ip-forgejo-import-state-updated state)
+                       (length (ip-forgejo-import-state-errors state))
+                       (float-time duration))
+      
+      (message "Forgejo import complete: %d new, %d updated in %.1fs"
+               (ip-forgejo-import-state-inserted state)
+               (ip-forgejo-import-state-updated state)
+               (float-time duration)))
     
-    (message "Forgejo import complete: %d new, %d updated in %.1fs"
-             (ip-forgejo-import-state-inserted state)
-             (ip-forgejo-import-state-updated state)
-             (float-time duration))
-    
-    ;; Show log buffer if errors
-    (when (ip-forgejo-import-state-errors state)
+    ;; Show log buffer if errors or forced
+    (when (or forced (ip-forgejo-import-state-errors state))
       (display-buffer "*Forgejo Log*"))
+    
+    ;; Cancel watchdog timer
+    (when ip-forgejo--import-timeout-timer
+      (cancel-timer ip-forgejo--import-timeout-timer)
+      (setq ip-forgejo--import-timeout-timer nil))
     
     ;; Reset state
     (setq ip-forgejo--import-state nil)))
@@ -413,7 +474,14 @@ On error, call ERROR-CALLBACK with error message."
                         :inserted 0
                         :updated 0
                         :errors nil
-                        :start-time (current-time)))
+                        :start-time (current-time)
+                        :last-activity (current-time)))
+                 
+                 ;; Start watchdog timer (checks every 5 seconds)
+                 (when ip-forgejo--import-timeout-timer
+                   (cancel-timer ip-forgejo--import-timeout-timer))
+                 (setq ip-forgejo--import-timeout-timer
+                       (run-with-timer 5 5 'ip-forgejo--check-stalled))
                  
                  ;; Step 5: Process all issues (async)
                  (message "Processing %d issues asynchronously..." (length all-issues))
@@ -438,8 +506,21 @@ On error, call ERROR-CALLBACK with error message."
   (interactive)
   (if ip-forgejo--import-state
       (progn
+        (when ip-forgejo--import-timeout-timer
+          (cancel-timer ip-forgejo--import-timeout-timer)
+          (setq ip-forgejo--import-timeout-timer nil))
         (setq ip-forgejo--import-state nil)
         (message "Forgejo import aborted"))
+    (message "No import in progress")))
+
+;;;###autoload
+(defun ip-forgejo-force-complete ()
+  "Force completion of stalled import."
+  (interactive)
+  (if ip-forgejo--import-state
+      (progn
+        (ip-forgejo--log 'warning "Forcing import completion...")
+        (ip-forgejo--import-complete ip-forgejo--import-state t))
     (message "No import in progress")))
 
 ;;;###autoload
@@ -468,6 +549,7 @@ On error, call ERROR-CALLBACK with error message."
     (define-key map (kbd "C-c f s") 'ip-forgejo-switch-instance)
     (define-key map (kbd "C-c f a") 'ip-forgejo-abort-import)
     (define-key map (kbd "C-c f l") 'ip-forgejo-show-log)
+    (define-key map (kbd "C-c f f") 'ip-forgejo-force-complete)
     map)
   "Keymap for `ip-forgejo-mode'.")
 
