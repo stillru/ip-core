@@ -235,6 +235,20 @@ On error, call ERROR-CALLBACK with error message."
       (alist-get 'full_name repo)
       "unknown"))
 
+(defun ip-forgejo--extract-tags (issue)
+  "Extract tags from ISSUE labels and convert to Org tags format."
+  (let* ((labels (alist-get 'labels issue))
+         (label-names (when (and labels (listp labels))
+                       (mapcar (lambda (label)
+                                 (let ((name (alist-get 'name label)))
+                                   ;; Convert to valid Org tag: remove special chars, replace / with _
+                                   (when name
+                                     (replace-regexp-in-string 
+                                      "[^A-Za-z0-9_@]" "_"
+                                      (replace-regexp-in-string "/" "_" name)))))
+                               labels))))
+    (cl-remove-if #'null label-names)))
+
 ;;; ============================================================================
 ;;; Org Entry Formatting
 ;;; ============================================================================
@@ -244,6 +258,13 @@ On error, call ERROR-CALLBACK with error message."
   (when (and iso-str (not (string-empty-p iso-str)))
     (condition-case nil
         (format-time-string "%Y-%m-%d %a" (date-to-time iso-str))
+      (error nil))))
+
+(defun ip-forgejo--format-timestamp-with-time (iso-str)
+  "Convert ISO8601 to Org timestamp with time."
+  (when (and iso-str (not (string-empty-p iso-str)))
+    (condition-case nil
+        (format-time-string "%Y-%m-%d %a %H:%M" (date-to-time iso-str))
       (error nil))))
 
 (defun ip-forgejo--format-logbook (times)
@@ -293,17 +314,56 @@ On error, call ERROR-CALLBACK with error message."
                                     :initial-value 0)
                        0))
          (logbook (ip-forgejo--format-logbook times))
-         (deadline (alist-get 'deadline issue))
-         (deadline-str (when deadline
-                        (let ((ts (ip-forgejo--format-timestamp deadline)))
-                          (when ts (format "DEADLINE: <%s>" ts))))))
+         
+         ;; Extract timestamps
+         (created-at (alist-get 'created_at issue))
+         (updated-at (alist-get 'updated_at issue))
+         (closed-at (alist-get 'closed_at issue))
+         (due-date (alist-get 'due_date issue))
+         
+         ;; Format timestamps for Org
+         (scheduled-str (when created-at
+                         (let ((ts (ip-forgejo--format-timestamp created-at)))
+                           (when ts (format "SCHEDULED: <%s>" ts)))))
+         (deadline-str (when due-date
+                        (let ((ts (ip-forgejo--format-timestamp due-date)))
+                          (when ts (format "DEADLINE: <%s>" ts)))))
+         (closed-str (when closed-at
+                      (let ((ts (ip-forgejo--format-timestamp-with-time closed-at)))
+                        (when ts (format "CLOSED: [%s]" ts)))))
+         
+         ;; Extract and format tags
+         (label-tags (ip-forgejo--extract-tags issue))
+         (all-tags (seq-uniq (append label-tags (list owner repo-name))))
+         (tags-str (if all-tags
+                      (concat ":" (mapconcat 'identity all-tags ":") ":")
+                    "")))
     
-    (format "* %s %s    :%s:%s:\n%s\n:PROPERTIES:\n:ID: %s\n:FORGEJO_URL: %s\n:STATE: %s\n:TIME: %d\n:END:\n%s\n%s\n"
-            todo title owner repo-name
-            (or deadline-str "")
-            org-id issue-url state total-time
-            (or logbook "")
-            body)))
+    ;; Build the Org entry
+    (concat
+     ;; Heading line with TODO, title and tags
+     (format "* %s %s    %s\n" todo title tags-str)
+     
+     ;; Timestamps (SCHEDULED, DEADLINE, CLOSED)
+     (when scheduled-str (concat scheduled-str "\n"))
+     (when deadline-str (concat deadline-str "\n"))
+     (when closed-str (concat closed-str "\n"))
+     
+     ;; Properties drawer
+     (format ":PROPERTIES:\n:ID: %s\n:FORGEJO_URL: %s\n:STATE: %s\n:TIME: %d\n:CREATED: %s\n:UPDATED: %s\n:END:\n"
+             org-id 
+             issue-url 
+             state 
+             total-time
+             (or created-at "")
+             (or updated-at ""))
+     
+     ;; Logbook
+     (or logbook "")
+     
+     ;; Body
+     body
+     "\n")))
 
 ;;; ============================================================================
 ;;; Org Buffer Operations
