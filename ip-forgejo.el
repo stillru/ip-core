@@ -139,15 +139,20 @@ On error, call ERROR-CALLBACK with error message."
       :parser (lambda ()
                 (condition-case err
                     (let ((json-str (buffer-string)))
-                      (ip-forgejo--log 'info "← PARSE: %d bytes" (length json-str))
-                      (json-parse-string json-str
-                                         :object-type 'alist
-                                         :array-type 'list
-                                         :null-object nil
-                                         :false-object :false))
+                      (if (string-empty-p (string-trim json-str))
+                          (progn
+                            (ip-forgejo--log 'info "← PARSE: empty response, returning empty list")
+                            '())  ; Return empty list for empty response
+                        (progn
+                          (ip-forgejo--log 'info "← PARSE: %d bytes" (length json-str))
+                          (json-parse-string json-str
+                                             :object-type 'alist
+                                             :array-type 'list
+                                             :null-object nil
+                                             :false-object :false))))
                   (error
                    (ip-forgejo--log 'error "← PARSE ERROR: %s" err)
-                   nil)))
+                   '())))
       :success (cl-function
                 (lambda (&key data response &allow-other-keys)
                   (setq request-called t)
@@ -158,11 +163,12 @@ On error, call ERROR-CALLBACK with error message."
                                        ((listp data) (length data))
                                        ((vectorp data) (length data))
                                        ((stringp data) (length data))
+                                       ((null data) 0)  ; Handle nil
                                        (t 0))))
                     (ip-forgejo--log 'success "← SUCCESS: status=%s, type=%s, length=%d, time=%.2fs"
                                      status data-type data-length duration)
-                    (when data
-                      (funcall callback data)))))
+                    ;; IMPORTANT: Always call callback, even with nil/empty data
+                    (funcall callback (or data '())))))
       :error (cl-function
               (lambda (&key error-thrown response symbol-status &allow-other-keys)
                 (setq request-called t)
