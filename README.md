@@ -61,13 +61,13 @@ All data lives in plain-text Org files → fully version-controllable.
 
 6. **Modules**
 
-  | Module     | Purpose                                    |
-  | ---------- | ------------------------------------------ |
-  | ip-core    | Loads company/client data from Org files   |
-  | ip-invoice | Generates HTML invoices from clocked time  |
-  | ip-forgejo | Syncs Git/Forgejo issues as Org tasks      |
-  | ip-tax     | Tracks income/expenses in Beancount ledger |
-  | ip-debug   | Unified logging (optional)                 |
+    | Module     | Purpose                                    |
+    | ---------- | ------------------------------------------ |
+    | ip-core    | Loads company/client data from Org files   |
+    | ip-invoice | Generates HTML invoices from clocked time  |
+    | ip-forgejo | Syncs Git/Forgejo issues as Org tasks      |
+    | ip-tax     | Tracks income/expenses in Beancount ledger |
+    | ip-debug   | Unified logging (optional)                 |
 
 7. **Requirements**:
 
