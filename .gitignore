@@ -1,0 +1,46 @@
+# Emacs temporary files
+*~
+\#*\#
+.\#*
+.*.swp
+*.elc
+auto-save-list
+tramp
+.DS_Store
+
+# Testing and development data
+test/
+*.test.el
+*-test.org
+test-data/
+draft/
+final/
+
+# Personal configuration
+personal-*.el
+my-*.el
+local-*.el
+
+# Invoice data (never commit real invoices!)
+invoices/
+*.beancount
+tax.beancount
+
+# Org data directories
+~/org/ip/
+org/ip/
+
+# Logs and debug
+*.log
+*-debug.log
+
+# Package management
+.cask/
+dist/
+*.tar
+*.tar.gz
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
