@@ -276,13 +276,13 @@ On error, call ERROR-CALLBACK with error message."
                        (lambda (entry)
                          (let* ((created (alist-get 'created entry))
                                 (duration (or (alist-get 'time entry) 0))
-                                (ts (condition-case nil
-                                        (date-to-time created)
-                                      (error nil))))
-                           (when (and ts (> duration 0))
-                             (let* ((end-time (time-add ts (seconds-to-time duration)))
-                                    (start-str (format-time-string "[%Y-%m-%d %a %H:%M]" ts))
-                                    (end-str (format-time-string "[%Y-%m-%d %a %H:%M]" end-time))
+                                (end-ts (condition-case nil
+                                           (date-to-time created)
+                                         (error nil))))
+                           (when (and end-ts (> duration 0))
+                             (let* ((start-ts (time-subtract end-ts (seconds-to-time duration)))
+                                    (start-str (format-time-string "[%Y-%m-%d %a %H:%M]" start-ts))
+                                    (end-str (format-time-string "[%Y-%m-%d %a %H:%M]" end-ts))
                                     (h (/ duration 3600))
                                     (m (/ (% duration 3600) 60)))
                                (format "CLOCK: %s--%s => %02d:%02d"
