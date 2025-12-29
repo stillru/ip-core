@@ -1,7 +1,7 @@
 ;;; ip-forgejo.el --- Forgejo issues integration (Async) -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 IP Management System
-;; Version: 3.1
+;; Version: 3.2
 ;; Keywords: org, forgejo, issues, async
 
 ;;; Commentary:
@@ -10,6 +10,9 @@
 ;; - Progress reporting
 ;; - Better error handling
 ;; - Modular structure
+;; - Insertion/update using Org API (properties, stable IDs, preserves subtrees)
+;; - Single planning line
+;; - Body/logbook replacement without destroying manual sub-headings
 
 ;;; Code:
 
@@ -142,7 +145,7 @@ On error, call ERROR-CALLBACK with error message."
                       (if (string-empty-p (string-trim json-str))
                           (progn
                             (ip-forgejo--log 'info "← PARSE: empty response, returning empty list")
-                            '())  ; Return empty list for empty response
+                            '())  
                         (progn
                           (ip-forgejo--log 'info "← PARSE: %d bytes" (length json-str))
                           (json-parse-string json-str
@@ -163,11 +166,10 @@ On error, call ERROR-CALLBACK with error message."
                                        ((listp data) (length data))
                                        ((vectorp data) (length data))
                                        ((stringp data) (length data))
-                                       ((null data) 0)  ; Handle nil
+                                       ((null data) 0)
                                        (t 0))))
                     (ip-forgejo--log 'success "← SUCCESS: status=%s, type=%s, length=%d, time=%.2fs"
                                      status data-type data-length duration)
-                    ;; IMPORTANT: Always call callback, even with nil/empty data
                     (funcall callback (or data '())))))
       :error (cl-function
               (lambda (&key error-thrown response symbol-status &allow-other-keys)
@@ -190,14 +192,12 @@ On error, call ERROR-CALLBACK with error message."
                                    "no-response")))
                      (ip-forgejo--log 'info "← COMPLETE: status=%s, called=%s, time=%.2fs"
                                       status request-called duration)
-                     ;; Safety net: if neither success nor error was called
                      (unless request-called
                        (ip-forgejo--log 'warning "← NO CALLBACK INVOKED for: %s" url)
                        (when error-callback
                          (funcall error-callback "Request completed without callback"))))))
-      :timeout 15)  ; Reduced timeout to 15 seconds
+      :timeout 15)
     
-    ;; Additional safety: schedule a timeout check
     (run-with-timer 20 nil
                     (lambda ()
                       (unless request-called
@@ -205,7 +205,6 @@ On error, call ERROR-CALLBACK with error message."
                           (ip-forgejo--log 'error "← TIMEOUT (20s): %s, time=%.2fs" url duration)
                           (when error-callback
                             (funcall error-callback "Request timeout"))))))))
-
 
 ;;; ============================================================================
 ;;; Data Extraction Helpers
@@ -219,14 +218,11 @@ On error, call ERROR-CALLBACK with error message."
   "Extract owner name from REPO alist, handling different formats."
   (let ((owner (alist-get 'owner repo)))
     (cond
-     ;; owner is a string directly
      ((stringp owner) owner)
-     ;; owner is an alist with login field
      ((and owner (listp owner))
       (or (alist-get 'login owner)
           (alist-get 'username owner)
           "unknown"))
-     ;; fallback
      (t "unknown"))))
 
 (defun ip-forgejo--extract-repo-name (repo)
@@ -241,7 +237,6 @@ On error, call ERROR-CALLBACK with error message."
          (label-names (when (and labels (listp labels))
                        (mapcar (lambda (label)
                                  (let ((name (alist-get 'name label)))
-                                   ;; Convert to valid Org tag: remove special chars, replace / with _
                                    (when name
                                      (replace-regexp-in-string 
                                       "[^A-Za-z0-9_@]" "_"
@@ -250,7 +245,7 @@ On error, call ERROR-CALLBACK with error message."
     (cl-remove-if #'null label-names)))
 
 ;;; ============================================================================
-;;; Org Entry Formatting
+;;; Org Entry Formatting (now returns structured data)
 ;;; ============================================================================
 
 (defun ip-forgejo--format-timestamp (iso-str)
@@ -267,106 +262,121 @@ On error, call ERROR-CALLBACK with error message."
         (format-time-string "%Y-%m-%d %a %H:%M" (date-to-time iso-str))
       (error nil))))
 
-(defun ip-forgejo--format-logbook (times)
-  "Format time log entries."
-  (when (and times (listp times) (> (length times) 0))
-    (let ((entries
-           (cl-remove nil
-                      (mapcar
-                       (lambda (entry)
-                         (let* ((created (alist-get 'created entry))
-                                (duration (or (alist-get 'time entry) 0))
-                                (end-ts (condition-case nil
-                                           (date-to-time created)
-                                         (error nil))))
-                           (when (and end-ts (> duration 0))
-                             (let* ((start-ts (time-subtract end-ts (seconds-to-time duration)))
-                                    (start-str (format-time-string "[%Y-%m-%d %a %H:%M]" start-ts))
-                                    (end-str (format-time-string "[%Y-%m-%d %a %H:%M]" end-ts))
-                                    (h (/ duration 3600))
-                                    (m (/ (% duration 3600) 60)))
-                               (format "CLOCK: %s--%s => %02d:%02d"
-                                       start-str end-str h m)))))
-                       times))))
-      (when entries
-        (concat ":LOGBOOK:\n"
-                (string-join entries "\n")
-                "\n:END:\n")))))
-
-(defun ip-forgejo--format-entry (issue times)
-  "Format ISSUE with TIMES into Org heading."
+(defun ip-forgejo--format-entry-data (issue times issue-url)
+  "Return plist with structured data for Org entry."
   (let* ((title (or (alist-get 'title issue) "Untitled"))
-         (number (or (alist-get 'number issue) 0))
          (state (or (alist-get 'state issue) "open"))
          (todo (if (string= state "closed") "DONE" "TODO"))
          (body (or (alist-get 'body issue) ""))
          (repo (alist-get 'repository issue))
          (owner (ip-forgejo--extract-owner repo))
          (repo-name (ip-forgejo--extract-repo-name repo))
-         (config (ip-forgejo--config))
-         (base-url (car config))
-         (web-url (replace-regexp-in-string "/api/v1$" "" base-url))
-         (issue-url (format "%s/%s/%s/issues/%d" web-url owner repo-name number))
-         (org-id (org-id-new))
+         (label-tags (ip-forgejo--extract-tags issue))
+         (all-tags (seq-uniq (append label-tags (list owner repo-name))))
+         (tags-str (if all-tags
+                       (concat ":" (mapconcat #'identity all-tags ":") ":")
+                     ""))
+         (tags-part (if tags-str (concat "    " tags-str) ""))
+         (heading (format "* %s %s%s" todo title tags-part))
          (total-time (if (and times (listp times))
-                         (cl-reduce #'+ (mapcar (lambda (e) (or (alist-get 'time e) 0))
-                                                times)
+                         (cl-reduce #'+ (mapcar (lambda (e) (or (alist-get 'time e) 0)) times)
                                     :initial-value 0)
                        0))
-         (logbook (ip-forgejo--format-logbook times))
-         
-         ;; Extract timestamps
+         (log-entries (when (and times (listp times) (> (length times) 0))
+                        (cl-remove nil
+                                   (mapcar
+                                    (lambda (entry)
+                                      (let* ((created (alist-get 'created entry))
+                                             (duration (or (alist-get 'time entry) 0))
+                                             (end-ts (condition-case nil
+                                                       (date-to-time created)
+                                                     (error nil))))
+                                        (when (and end-ts (> duration 0))
+                                          (let* ((start-ts (time-subtract end-ts (seconds-to-time duration)))
+                                                 (start-str (format-time-string "[%Y-%m-%d %a %H:%M]" start-ts))
+                                                 (end-str (format-time-string "[%Y-%m-%d %a %H:%M]" end-ts))
+                                                 (h (floor duration 3600))
+                                                 (m (/ (mod duration 3600) 60)))
+                                            (format "CLOCK: %s--%s => %2d:%02d" start-str end-str h m)))))
+                                    times))))
+         (logbook-inner (when log-entries
+                          (concat (string-join log-entries "\n") "\n")))
          (created-at (alist-get 'created_at issue))
          (updated-at (alist-get 'updated_at issue))
          (closed-at (alist-get 'closed_at issue))
          (due-date (alist-get 'due_date issue))
-         
-         ;; Format timestamps for Org
-         (scheduled-str (when created-at
-                         (let ((ts (ip-forgejo--format-timestamp created-at)))
-                           (when ts (format "SCHEDULED: <%s>" ts)))))
-         (deadline-str (when due-date
-                        (let ((ts (ip-forgejo--format-timestamp due-date)))
-                          (when ts (format "DEADLINE: <%s>" ts)))))
          (closed-str (when closed-at
-                      (let ((ts (ip-forgejo--format-timestamp-with-time closed-at)))
-                        (when ts (format "CLOSED: [%s]" ts)))))
-         
-         ;; Extract and format tags
-         (label-tags (ip-forgejo--extract-tags issue))
-         (all-tags (seq-uniq (append label-tags (list owner repo-name))))
-         (tags-str (if all-tags
-                      (concat ":" (mapconcat 'identity all-tags ":") ":")
-                    "")))
-    
-    ;; Build the Org entry
-    (concat
-     ;; Heading line with TODO, title and tags
-     (format "* %s %s    %s\n" todo title tags-str)
-     
-     ;; Timestamps (SCHEDULED, DEADLINE, CLOSED)
-     (when scheduled-str (concat scheduled-str "\n"))
-     (when deadline-str (concat deadline-str "\n"))
-     (when closed-str (concat closed-str "\n"))
-     
-     ;; Properties drawer
-     (format ":PROPERTIES:\n:ID: %s\n:FORGEJO_URL: %s\n:STATE: %s\n:TIME: %d\n:CREATED: %s\n:UPDATED: %s\n:END:\n"
-             org-id 
-             issue-url 
-             state 
-             total-time
-             (or created-at "")
-             (or updated-at ""))
-     
-     ;; Logbook
-     (or logbook "")
-     
-     ;; Body
-     body
-     "\n")))
+                       (let ((ts (ip-forgejo--format-timestamp-with-time closed-at)))
+                         (when ts (format "CLOSED: [%s]" ts)))))
+         (scheduled-str (when created-at
+                          (let ((ts (ip-forgejo--format-timestamp created-at)))
+                            (when ts (format "SCHEDULED: <%s>" ts)))))
+         (deadline-str (when due-date
+                         (let ((ts (ip-forgejo--format-timestamp due-date)))
+                           (when ts (format "DEADLINE: <%s>" ts)))))
+         (planning-parts (cl-remove nil (list closed-str scheduled-str deadline-str)))
+         (planning (when planning-parts
+                     (concat "  " (string-join planning-parts " ") "\n")))
+         (properties `(("FORGEJO_URL" . ,issue-url)
+                       ("STATE" . ,state)
+                       ("TIME" . ,(number-to-string total-time))
+                       ("CREATED" . ,(or created-at ""))
+                       ("UPDATED" . ,(or updated-at "")))))
+    (list :heading heading
+          :planning planning
+          :logbook logbook-inner
+          :body body
+          :properties properties)))
 
 ;;; ============================================================================
-;;; Org Buffer Operations
+;;; Org API Helpers for Insertion/Update
+;;; ============================================================================
+
+(defun ip-forgejo--remove-planning-lines ()
+  "Remove all existing planning lines (CLOSED:/SCHEDULED:/DEADLINE:)."
+  (save-excursion
+    (org-back-to-heading t)
+    (forward-line 1)
+    (while (looking-at org-planning-line-re)
+      (delete-region (line-beginning-position) (1+ (line-end-position)))
+      (forward-line 1))))
+
+(defun ip-forgejo--replace-drawer (drawer-name content)
+  "Replace or insert drawer DRAWER-NAME with CONTENT (inner text only)."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((drawer-re (format "^:%s:$" (upcase drawer-name))))
+      (when (re-search-forward drawer-re (org-entry-end-position) t)
+        (let ((start (line-beginning-position))
+              (end (or (and (re-search-forward "^:END:$" (org-entry-end-position) t)
+                            (line-beginning-position))
+                       (org-entry-end-position))))
+          (delete-region start end)))
+      (when content
+        (org-end-of-meta-data t)
+        (insert (format ":%s:\n%s:END:\n" (upcase drawer-name) content))))))
+
+(defun ip-forgejo--replace-body (content)
+  "Replace body text with CONTENT, preserving any sub-headings."
+  (save-excursion
+    (org-back-to-heading t)
+    (org-end-of-meta-data t)
+    (skip-chars-forward " \t\n")
+    (let ((body-start (point))
+          (body-end (or (save-excursion
+                          (when (re-search-forward "^\\* " nil t)
+                            (match-beginning 0)))
+                        (point-max))))
+      (when (< body-start body-end)
+        (delete-region body-start body-end))
+      (goto-char body-start)
+      (when (and content (not (string-empty-p (string-trim content))))
+        (insert (string-trim-right content))
+        (unless (bolp) (insert "\n"))
+        (insert "\n")))))
+
+;;; ============================================================================
+;;; Org Buffer Operations (now using Org API)
 ;;; ============================================================================
 
 (defun ip-forgejo--find-entry-by-url (url)
@@ -380,26 +390,39 @@ On error, call ERROR-CALLBACK with error message."
           (throw 'found (point))))
       nil)))
 
-(defun ip-forgejo--insert-or-update (url entry)
-  "Insert or update entry with URL in current buffer."
-  (let ((pos (ip-forgejo--find-entry-by-url url)))
-    (if pos
-        ;; Update existing
-        (progn
+(defun ip-forgejo--insert-or-update (url data)
+  "Insert new entry or update existing one using structured DATA and URL key."
+  (let ((pos (ip-forgejo--find-entry-by-url url))
+        result)
+    (save-excursion
+      (if pos
           (goto-char pos)
-          (let ((beg (point))
-                (end (save-excursion
-                       (org-end-of-subtree t t)
-                       (point))))
-            (delete-region beg end)
-            (insert entry)
-            'updated))
-      ;; Insert new
-      (progn
         (goto-char (point-max))
-        (unless (bolp) (insert "\n"))
-        (insert entry)
-        'inserted))))
+        (unless (bolp) (insert "\n")))
+      (when (not pos)
+        (insert (plist-get data :heading) "\n"))
+      (org-back-to-heading t)
+      (when pos
+        (delete-region (line-beginning-position) (1+ (line-end-position)))
+        (insert (plist-get data :heading) "\n"))
+      ;; Stable Org ID
+      (org-id-get-create)
+      ;; Properties via Org API
+      (dolist (pair (plist-get data :properties))
+        (org-entry-put nil (car pair) (cdr pair)))
+      ;; Planning line
+      (ip-forgejo--remove-planning-lines)
+      (when (plist-get data :planning)
+        (org-back-to-heading t)
+        (end-of-line)
+        (insert "\n")
+        (insert (plist-get data :planning)))
+      ;; Logbook drawer
+      (ip-forgejo--replace-drawer "LOGBOOK" (plist-get data :logbook))
+      ;; Body text
+      (ip-forgejo--replace-body (plist-get data :body))
+      (setq result (if pos 'updated 'inserted)))
+    result))
 
 ;;; ============================================================================
 ;;; Import Logic - Async Orchestration
@@ -422,33 +445,26 @@ On error, call ERROR-CALLBACK with error message."
     (ip-forgejo--log 'info "→ PROCESS: issue #%d (id=%s, %s/%s)" 
                      number issue-id owner repo-name)
     
-    ;; Fetch time logs asynchronously
     (ip-forgejo--api-async
      times-url
      (lambda (times)
-       ;; Success: format and insert
        (let ((times-count (if (listp times) (length times) 0)))
          (ip-forgejo--log 'info "← RECEIVED: issue #%d has %d time entries" 
                           number times-count)
-         (let ((entry (ip-forgejo--format-entry issue times)))
-           
+         (let ((data (ip-forgejo--format-entry-data issue times issue-url)))
            (ip-forgejo--log 'info "→ INSERT/UPDATE: issue #%d to buffer %s"
                             number (buffer-name (ip-forgejo-import-state-buffer state)))
-           
            (condition-case err
                (with-current-buffer (ip-forgejo-import-state-buffer state)
                  (save-excursion
-                   (let ((result (ip-forgejo--insert-or-update issue-url entry)))
+                   (let ((result (ip-forgejo--insert-or-update issue-url data)))
                      (cl-incf (ip-forgejo-import-state-processed state))
                      (when (eq result 'inserted)
                        (cl-incf (ip-forgejo-import-state-inserted state)))
                      (when (eq result 'updated)
                        (cl-incf (ip-forgejo-import-state-updated state)))
-                     
                      (ip-forgejo--log 'success "✓ DONE: issue #%d (%s)" number result)
                      (ip-forgejo--progress state)
-                     
-                     ;; Check if done
                      (when (>= (ip-forgejo-import-state-processed state)
                                (ip-forgejo-import-state-total state))
                        (ip-forgejo--log 'success "ALL ISSUES PROCESSED - completing import")
@@ -459,21 +475,15 @@ On error, call ERROR-CALLBACK with error message."
               (push (format "Issue #%d insert failed: %s" number err)
                     (ip-forgejo-import-state-errors state))
               (ip-forgejo--progress state)
-              
-              ;; Check if done despite error
               (when (>= (ip-forgejo-import-state-processed state)
                         (ip-forgejo-import-state-total state))
                 (ip-forgejo--import-complete state)))))))
-     
-     ;; Error callback
      (lambda (err)
        (ip-forgejo--log 'error "✗ FAILED to fetch times for issue #%d: %s" number err)
        (cl-incf (ip-forgejo-import-state-processed state))
        (push (format "Issue #%d times fetch failed: %s" number err)
              (ip-forgejo-import-state-errors state))
        (ip-forgejo--progress state)
-       
-       ;; Check if done despite error
        (when (>= (ip-forgejo-import-state-processed state)
                  (ip-forgejo-import-state-total state))
          (ip-forgejo--log 'warning "All issues attempted despite errors - completing import")
@@ -516,16 +526,13 @@ On error, call ERROR-CALLBACK with error message."
                (ip-forgejo-import-state-updated state)
                (float-time duration)))
     
-    ;; Show log buffer if errors or forced
     (when (or forced (ip-forgejo-import-state-errors state))
       (display-buffer "*Forgejo Log*"))
     
-    ;; Cancel watchdog timer
     (when ip-forgejo--import-timeout-timer
       (cancel-timer ip-forgejo--import-timeout-timer)
       (setq ip-forgejo--import-timeout-timer nil))
     
-    ;; Reset state
     (setq ip-forgejo--import-state nil)))
 
 ;;; ============================================================================
@@ -549,7 +556,6 @@ On error, call ERROR-CALLBACK with error message."
     (ip-forgejo--log 'info "Starting import from %s" ip-forgejo-current-instance)
     (message "Fetching issues from %s..." ip-forgejo-current-instance)
     
-    ;; Step 1: Get user info
     (ip-forgejo--api-async
      user-url
      (lambda (user)
@@ -560,14 +566,12 @@ On error, call ERROR-CALLBACK with error message."
          
          (ip-forgejo--log 'info "Fetching issues for user: %s" username)
          
-         ;; Step 2: Fetch open issues
          (ip-forgejo--api-async
           open-url
           (lambda (open-issues)
             (setq all-issues (append all-issues (if (listp open-issues) open-issues nil)))
             (ip-forgejo--log 'info "Found %d open issues" (length all-issues))
             
-            ;; Step 3: Fetch closed issues
             (ip-forgejo--api-async
              closed-url
              (lambda (closed-issues)
@@ -578,7 +582,6 @@ On error, call ERROR-CALLBACK with error message."
                (if (= (length all-issues) 0)
                    (message "No issues found to import")
                  
-                 ;; Step 4: Initialize import state
                  (setq ip-forgejo--import-state
                        (make-ip-forgejo-import-state
                         :buffer (current-buffer)
@@ -591,13 +594,11 @@ On error, call ERROR-CALLBACK with error message."
                         :start-time (current-time)
                         :last-activity (current-time)))
                  
-                 ;; Start watchdog timer (checks every 5 seconds)
                  (when ip-forgejo--import-timeout-timer
                    (cancel-timer ip-forgejo--import-timeout-timer))
                  (setq ip-forgejo--import-timeout-timer
                        (run-with-timer 5 5 'ip-forgejo--check-stalled))
                  
-                 ;; Step 5: Process all issues (async)
                  (message "Processing %d issues asynchronously..." (length all-issues))
                  (dolist (issue all-issues)
                    (ip-forgejo--process-issue issue ip-forgejo--import-state))))
