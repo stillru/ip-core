@@ -276,7 +276,7 @@ GPL-3.0 or later
 
 ## Author
 
-Maintained by stillru
+Maintained by Stepan "stillru" Illichevskii <still.ru@gmail.com>
 
 ## Support
 
